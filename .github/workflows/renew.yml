@@ -95,6 +95,7 @@ jobs:
         USERS_JSON: ${{ secrets.USERS_JSON }}
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        FORCE_RENEW: ${{ inputs.force || 'false' }}
         PROXY_SERVER: ${{ steps.proxy.outputs.proxy_server }}
       run: python3 app.py
 
