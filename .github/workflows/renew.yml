@@ -5,6 +5,12 @@ on:
     # 每 4 小时调度执行一次，及时捕获 24h 冷却期结束的可续期窗口
     - cron: '0 */4 * * *'
   workflow_dispatch: # 支持 GitHub 控制台手动一键触发
+    inputs:
+      force:
+        description: "是否强制发起续期请求 (忽略 24h 冷却保护)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
