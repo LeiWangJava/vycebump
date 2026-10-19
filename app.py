@@ -68,10 +68,8 @@ def http_request(
     if proxy:
         handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
 
-    # 忽略不严格的 SSL 证书校验，保证兼容性
+    # 使用系统标准 CA 证书校验 HTTPS，防范中间人攻击
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
     handlers.append(urllib.request.HTTPSHandler(context=ctx))
 
     opener = urllib.request.build_opener(*handlers)
@@ -201,32 +199,37 @@ def get_cookie_from_cdp(cdp_base_url: str = CDP_URL) -> Optional[str]:
     if not target_tab:
         return None
 
-    ws_url = target_tab.get("webSocketDebuggerUrl")
-    if not ws_url:
+    ws_url = target_tab.get("webSocketDebuggerUrl", "")
+    if not ws_url or not (ws_url.startswith("ws://") or ws_url.startswith("wss://")):
         return None
 
-    # 利用本地 node 执行单次 WebSocket 提取
-    node_code = f"""
-    const ws = new WebSocket("{ws_url}");
-    ws.addEventListener("open", () => {{
-      ws.send(JSON.stringify({{
+    # 利用本地 node 执行单次 WebSocket 提取，通过命令行参数传递 wsUrl，防止代码插值注入
+    node_code = """
+    const wsUrl = process.argv[1];
+    if (!wsUrl) process.exit(1);
+    const ws = new WebSocket(wsUrl);
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({
         id: 1,
         method: "Network.getCookies",
-        params: {{ urls: ["https://vyce.cloud"] }}
-      }}));
-    }});
-    ws.addEventListener("message", (event) => {{
+        params: { urls: ["https://vyce.cloud"] }
+      }));
+    });
+    ws.addEventListener("message", (event) => {
       const res = JSON.parse(event.data);
       const cookies = res.result?.cookies || [];
       const target = cookies.find(c => c.name === "__Host-vyce_sid");
       if (target) console.log("__Host-vyce_sid=" + target.value);
       ws.close();
       process.exit(0);
-    }});
+    });
+    ws.addEventListener("error", () => {
+      process.exit(1);
+    });
     """
     try:
         p = subprocess.run(
-            ["node", "--input-type=module", "-e", node_code],
+            ["node", "--input-type=module", "-e", node_code, ws_url],
             capture_output=True,
             text=True,
             timeout=8
@@ -234,8 +237,10 @@ def get_cookie_from_cdp(cdp_base_url: str = CDP_URL) -> Optional[str]:
         out = p.stdout.strip()
         if "__Host-vyce_sid=" in out:
             return out
-    except Exception:
-        pass
+    except FileNotFoundError:
+        print("ℹ️ 本地环境未检测到 node 命令，跳过 CDP WebSocket 自动化提取。")
+    except Exception as e:
+        print(f"⚠️ CDP 提取异常: {e}")
 
     return None
 
@@ -406,7 +411,7 @@ def save_state(state: Dict):
         print(f"⚠️ 保存状态文件失败: {e}")
 
 
-def process_account(account: Dict, state: Dict, proxy: Optional[str] = None):
+def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> bool:
     cookie = account["cookie"]
     account_label = account.get("name", "VyceUser")
 
@@ -426,7 +431,7 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None):
             error_msg="无法通过 /api/me 获取用户信息，请检查或重新获取 __Host-vyce_sid。",
             proxy=proxy
         )
-        return
+        return False
 
     real_username = user_info.get("login") or account_label
     print(f"✅ 登录成功！用户: {real_username} (ID: {user_info.get('id')})")
@@ -434,9 +439,10 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None):
     servers = client.get_servers()
     if not servers:
         print("ℹ️ 该账户名下无任何服务器。")
-        return
+        return True
 
     now_ms = int(time.time() * 1000)
+    account_ok = True
 
     for srv in servers:
         srv_id = srv.get("id")
@@ -454,6 +460,12 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None):
         if source != "free":
             print(f"   ℹ️ 非免费机型 (source={source})，跳过续期。")
             continue
+
+        # 读取并比对本地持久化缓存
+        cached_entry = state.get(srv_id)
+        if cached_entry and cached_entry.get("next_renewal_ts"):
+            cached_next = cached_entry.get("next_renewal_ts")
+            print(f"   📋 缓存记录下次续期: {ms_to_beijing_str(cached_next)}")
 
         # 计算剩余存活时间与冷却时间
         time_left_ms = expires_at - now_ms
@@ -519,6 +531,8 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None):
                 "time_left_str": details["time_left_str"],
                 "last_renew_ts": now_ms,
                 "last_renew_str": ms_to_beijing_str(now_ms),
+                "next_renewal_ts": now_ms + ONE_DAY_MS,
+                "next_renewal_str": ms_to_beijing_str(now_ms + ONE_DAY_MS),
             }
 
             send_tg_message(
@@ -540,6 +554,7 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None):
                 }
             else:
                 print(f"   ❌ 续期失败 (HTTP {code}): {msg}")
+                account_ok = False
                 state[srv_id] = {
                     "name": srv_name,
                     "user": real_username,
@@ -555,6 +570,8 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None):
                     error_msg=f"HTTP {code}: {msg}",
                     proxy=proxy
                 )
+
+    return account_ok
 
 
 # ============================================================
@@ -577,15 +594,22 @@ def main():
         sys.exit(1)
 
     state = load_state()
+    all_success = True
 
     for acc in accounts:
         try:
-            process_account(acc, state, proxy=proxy_server)
+            ok = process_account(acc, state, proxy=proxy_server)
+            if not ok:
+                all_success = False
         except Exception as e:
             print(f"❌ 处理账户 {acc.get('name')} 时出现未捕获异常: {e}")
+            all_success = False
 
     save_state(state)
     print(f"\n✅ 任务处理完毕，状态已保存至 {STATE_FILE}。")
+    if not all_success:
+        print("❌ 检测到有账户处理失败或续期异常，以非零状态码退出 (exit 1)。")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

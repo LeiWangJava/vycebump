@@ -28,6 +28,10 @@ jobs:
       with:
         python-version: '3.12'
 
+    # 核心算法与状态边界自动化测试
+    - name: Run Unit Tests
+      run: python3 -m unittest discover -s tests -v
+
     # (可选) 代理环境启动 (sing-box 支持全协议)
     - name: Start Proxy (sing-box)
       env:

@@ -321,50 +321,6 @@ def parse_tuic(parsed, params):
 # Main
 # ============================================================
 
-def _load_pool():
-    """Read pool.json (node topology, no passwords) if present."""
-    pool_file = os.environ.get("POOL_FILE", "pool.json")
-    if not os.path.exists(pool_file):
-        return []
-    with open(pool_file) as f:
-        data = json.load(f)
-    return [n for n in data if n.get("server") and n.get("port")]
-
-
-def _build_pool_outbounds(base_out, pool_nodes):
-    """Expand a base outbound into one outbound per pool node + urltest group.
-
-    Works for anytls AND http/socks/residential proxies:
-    - each pool node carries its own server + port (residential pool) or only port (shared anytls)
-    - credentials (password/fingerprint) come from the base outbound / PROXY_URL secrets
-    - pool.json must hold NO passwords (public repo safe).
-    """
-    outbounds = []
-    for i, node in enumerate(pool_nodes, 1):
-        ob = json.loads(json.dumps(base_out))  # deep copy
-        ob["tag"] = f"node-{i}"
-        if node.get("port"):
-            ob["server_port"] = int(node["port"])
-        if node.get("server"):
-            ob["server"] = node["server"]
-        if node.get("sni"):
-            ob.setdefault("tls", {}).setdefault("enabled", True)
-            ob["tls"]["server_name"] = node["sni"]
-        outbounds.append(ob)
-
-    outbounds.append(
-        {
-            "type": "urltest",
-            "tag": "proxy",
-            "outbounds": [f"node-{i}" for i in range(1, len(pool_nodes) + 1)],
-            "url": "https://www.gstatic.com/generate_204",
-            "interval": "30s",
-        }
-    )
-    outbounds.append({"type": "direct", "tag": "direct"})
-    return outbounds
-
-
 def _parse_proxy_url(proxy_url):
     scheme = proxy_url.split("://")[0].lower()
     if scheme == "vmess":
@@ -401,8 +357,7 @@ def main():
     print(f"Parsing proxy URI ({scheme}://***)")
     scheme, outbound = _parse_proxy_url(proxy_url)
 
-    # PROXY_CHAIN_URL：出口再套一层 HTTP/SOCKS（ZooProxy 经 AnyTLS 二跳）。
-    # Clash 订阅里 ZooProxy-HK 的 dialer-proxy=AnyTLS-googlevps，直连 as.zooproxy.com 会超时。
+    # PROXY_CHAIN_URL：出口可选再套一层 HTTP/SOCKS 二跳代理
     chain_url = os.environ.get("PROXY_CHAIN_URL", "").strip()
     outbounds = [outbound, {"type": "direct", "tag": "direct"}]
     if chain_url:
@@ -412,34 +367,6 @@ def main():
         chain_ob["detour"] = "dialer"
         outbounds = [outbound, chain_ob, {"type": "direct", "tag": "direct"}]
         print(f"  Chain mode: {scheme} -> {chain_scheme}://{chain_ob.get('server')}:{chain_ob.get('server_port')}")
-    elif scheme in ("anytls", "http", "https", "socks5", "socks"):
-        # 无二跳时才展开 pool.json。适用于 anytls / 住宅 http。
-        # PIN_NODE=N（1-based）：钉死第 N 只，不走 urltest。
-        pool = _load_pool()
-        if pool:
-            pin_raw = (os.environ.get("PIN_NODE") or "").strip()
-            pin = None
-            if pin_raw:
-                try:
-                    pin = int(pin_raw)
-                except ValueError:
-                    pin = None
-            if pin is not None and 1 <= pin <= len(pool):
-                node_obs = _build_pool_outbounds(outbound, [pool[pin - 1]])
-                pinned = [ob for ob in node_obs if ob.get("tag") == "node-1"]
-                if pinned:
-                    pinned[0]["tag"] = "proxy"
-                    outbounds = [pinned[0], {"type": "direct", "tag": "direct"}]
-                    n = pool[pin - 1]
-                    print(f"  Pin mode: #{pin} {n.get('name')} {n.get('server')}:{n.get('port')}")
-                else:
-                    outbounds = node_obs
-                    print(f"  Pool mode: {len(pool)} nodes + urltest")
-            else:
-                node_obs = _build_pool_outbounds(outbound, pool)
-                if node_obs:
-                    outbounds = node_obs
-                    print(f"  Pool mode: {len(pool)} nodes + urltest")
 
     config = {
         "log": {"level": "info", "timestamp": True},
