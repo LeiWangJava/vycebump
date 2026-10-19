@@ -83,13 +83,25 @@ class TestAccountFailureAndCooldown(unittest.TestCase):
         client = MagicMock()
         client.get_me.return_value = {"login": "test"}
         client.get_servers.return_value = [self.server]
-        client.renew_server.return_value = (False, 429, "renewal_cooldown")
         client_cls.return_value = client
+
+        # 1. 结构化错误代码
+        client.renew_server.return_value = (False, 429, "renewal_cooldown")
         state = {}
         self.assertTrue(app.process_account(self.account, state))
         self.assertEqual(state["srv-test"]["status"], "cooldown_429")
         notify.assert_not_called()
 
+        # 2. 真实服务端自然语言返回: "You can renew once every 24 hours. Please wait 7 more hour(s)."
+        client.renew_server.return_value = (False, 429, "You can renew once every 24 hours. Please wait 7 more hour(s).")
+        state = {}
+        self.assertTrue(app.process_account(self.account, state))
+        self.assertEqual(state["srv-test"]["status"], "cooldown_429")
+        # 验证等待时间是否被正确解析计算 (7 小时后)
+        self.assertAlmostEqual(state["srv-test"]["next_renewal_ts"], int(time.time() * 1000) + 7 * app.ONE_HOUR_MS, delta=2000)
+        notify.assert_not_called()
+
+        # 3. 非冷却相关的其他 429 频率限制依然被判定为异常并告警
         client.renew_server.return_value = (False, 429, "rate_limited")
         state = {}
         self.assertFalse(app.process_account(self.account, state))

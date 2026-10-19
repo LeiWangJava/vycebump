@@ -96,6 +96,22 @@ def _error_message(body: str, fallback: str) -> str:
     return fallback
 
 
+def is_renewal_cooldown_error(code: int, msg: str) -> bool:
+    """判定服务端返回的 429 是否属于预期的 24 小时续期冷却保护。"""
+    if code != 429 or not msg:
+        return False
+    lower = str(msg).lower()
+    cooldown_patterns = (
+        "renewal_cooldown",
+        "every 24 hours",
+        "24 hour",
+        "please wait",
+        "cooldown",
+        "not eligible for renewal",
+    )
+    return any(pattern in lower for pattern in cooldown_patterns)
+
+
 def http_request(
     url: str,
     method: str = "GET",
@@ -685,15 +701,21 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
                 proxy=proxy,
             )
         else:
-            expected_cooldown = code == 429 and msg == "renewal_cooldown"
+            expected_cooldown = is_renewal_cooldown_error(code, msg)
             if expected_cooldown:
                 print(f"   ⏳ 官方服务端提示冷却未完成 (429): {safe_error_text(msg)}")
+                wait_match = re.search(r"wait\s+(\d+)\s+more\s+hour", str(msg), re.IGNORECASE)
+                effective_next_ts = (
+                    now_ms + int(int(wait_match.group(1)) * ONE_HOUR_MS)
+                    if wait_match else next_avail_ts
+                )
                 state[srv_id] = {
                     "name": srv_name,
                     "user": real_username,
                     "status": "cooldown_429",
                     "msg": safe_error_text(msg),
-                    "next_renewal_ts": next_avail_ts,
+                    "next_renewal_ts": effective_next_ts,
+                    "next_renewal_str": ms_to_beijing_str(effective_next_ts),
                     "last_check_ts": now_ms,
                 }
             else:
