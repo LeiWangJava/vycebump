@@ -1,397 +1,296 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-proxy_handler.py -- Parse PROXY_URL and generate sing-box config.json
+"""Parse PROXY_URL and generate a restrictive sing-box HTTP proxy config."""
 
-Supported protocols:
-  socks5://[user:pass@]host:port
-  http://[user:pass@]host:port
-  https://[user:pass@]host:port
-  vless://uuid@host:port?security=tls&type=ws&...#name
-  vmess://base64EncodedJSON
-  hy2://password@host:port?sni=xxx&insecure=1
-  hysteria2://password@host:port?sni=xxx
-  anytls://password@host:port?sni=xxx&fp=chrome
-  tuic://uuid:password@host:port?sni=xxx&alpn=h3&congestion_control=bbr
-
-Output: config.json with HTTP inbound on 127.0.0.1:8080
-"""
-
-import os
-import sys
-import json
 import base64
-from urllib.parse import urlparse, parse_qs, unquote
+import binascii
+import json
+import os
+import re
+import stat
+import tempfile
+from urllib.parse import parse_qs, unquote, urlparse
 
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 8080
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
 
 
-# ============================================================
-# Protocol Parsers
-# ============================================================
-
-def parse_socks5(parsed):
-    outbound = {
-        "type": "socks",
-        "tag": "proxy",
-        "server": parsed.hostname,
-        "server_port": parsed.port or 1080,
-        "version": "5",
-    }
-    if parsed.username:
-        outbound["username"] = unquote(parsed.username)
-    if parsed.password:
-        outbound["password"] = unquote(parsed.password)
-    return outbound
+class ProxyConfigError(ValueError):
+    """A safe, user-actionable proxy configuration error."""
 
 
-def parse_http(parsed):
-    outbound = {
-        "type": "http",
-        "tag": "proxy",
-        "server": parsed.hostname,
-        "server_port": parsed.port or 8080,
-    }
-    if parsed.username:
-        outbound["username"] = unquote(parsed.username)
-    if parsed.password:
-        outbound["password"] = unquote(parsed.password)
-    if parsed.scheme == "https":
-        outbound["tls"] = {"enabled": True}
-    return outbound
+def _required(value, label):
+    if not isinstance(value, str) or not value.strip():
+        raise ProxyConfigError(f"missing {label}")
+    return value.strip()
 
 
-def parse_vless(parsed, params):
-    outbound = {
-        "type": "vless",
-        "tag": "proxy",
-        "server": parsed.hostname,
-        "server_port": parsed.port or 443,
-        "uuid": parsed.username,
-    }
-
-    # Flow (e.g. xtls-rprx-vision)
-    flow = params.get("flow", [""])[0]
-    if flow:
-        outbound["flow"] = flow
-
-    # TLS / REALITY
-    security = params.get("security", [""])[0]
-    if security in ("tls", "reality"):
-        tls = {"enabled": True}
-
-        sni = params.get("sni", [""])[0]
-        if sni:
-            tls["server_name"] = sni
-
-        fp = params.get("fp", [""])[0]
-        if fp:
-            tls["utls"] = {"enabled": True, "fingerprint": fp}
-
-        alpn = params.get("alpn", [""])[0]
-        if alpn:
-            tls["alpn"] = alpn.split(",")
-
-        insecure = params.get("insecure", params.get("allowInsecure", ["0"]))[0]
-        if insecure == "1":
-            tls["insecure"] = True
-
-        if security == "reality":
-            reality = {"enabled": True}
-            pbk = params.get("pbk", [""])[0]
-            if pbk:
-                reality["public_key"] = pbk
-            sid = params.get("sid", [""])[0]
-            if sid:
-                reality["short_id"] = sid
-            tls["reality"] = reality
-
-        outbound["tls"] = tls
-
-    # Transport
-    net_type = params.get("type", [""])[0]
-    if net_type == "ws":
-        transport = {"type": "ws"}
-        path = params.get("path", [""])[0]
-        if path:
-            transport["path"] = unquote(path)
-        host = params.get("host", [""])[0]
-        if host:
-            transport["headers"] = {"Host": host}
-        outbound["transport"] = transport
-    elif net_type == "grpc":
-        transport = {"type": "grpc"}
-        sn = params.get("serviceName", [""])[0]
-        if sn:
-            transport["service_name"] = sn
-        outbound["transport"] = transport
-    elif net_type in ("http", "h2"):
-        transport = {"type": "http"}
-        path = params.get("path", [""])[0]
-        if path:
-            transport["path"] = unquote(path)
-        host = params.get("host", [""])[0]
-        if host:
-            transport["host"] = [host]
-        outbound["transport"] = transport
-
-    return outbound
+def _host(parsed):
+    try:
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ProxyConfigError("invalid proxy host or port") from exc
+    if not host:
+        raise ProxyConfigError("missing proxy host")
+    if port is not None and not 1 <= port <= 65535:
+        raise ProxyConfigError("proxy port out of range")
+    return host, port
 
 
-def parse_vmess(url_str):
-    encoded = url_str[len("vmess://"):]
-    # Fix base64 padding
-    pad = 4 - len(encoded) % 4
-    if pad != 4:
-        encoded += "=" * pad
-    decoded = base64.b64decode(encoded).decode("utf-8")
-    cfg = json.loads(decoded)
-
-    outbound = {
-        "type": "vmess",
-        "tag": "proxy",
-        "server": cfg.get("add", ""),
-        "server_port": int(cfg.get("port", 443)),
-        "uuid": cfg.get("id", ""),
-        "security": cfg.get("scy", "auto"),
-        "alter_id": int(cfg.get("aid", 0)),
-    }
-
-    # TLS
-    if cfg.get("tls") == "tls":
-        tls = {"enabled": True}
-        sni = cfg.get("sni", "")
-        if sni:
-            tls["server_name"] = sni
-        elif cfg.get("host"):
-            tls["server_name"] = cfg["host"]
-        alpn = cfg.get("alpn", "")
-        if alpn:
-            tls["alpn"] = alpn.split(",")
-        outbound["tls"] = tls
-
-    # Transport
-    net = cfg.get("net", "tcp")
-    if net == "ws":
-        transport = {"type": "ws"}
-        if cfg.get("path"):
-            transport["path"] = cfg["path"]
-        if cfg.get("host"):
-            transport["headers"] = {"Host": cfg["host"]}
-        outbound["transport"] = transport
-    elif net == "grpc":
-        transport = {"type": "grpc"}
-        if cfg.get("path"):
-            transport["service_name"] = cfg["path"]
-        outbound["transport"] = transport
-    elif net in ("h2", "http"):
-        transport = {"type": "http"}
-        if cfg.get("path"):
-            transport["path"] = cfg["path"]
-        if cfg.get("host"):
-            transport["host"] = [cfg["host"]]
-        outbound["transport"] = transport
-
-    return outbound
+def _port(parsed, default):
+    _host(parsed)
+    try:
+        port = parsed.port or default
+    except ValueError as exc:
+        raise ProxyConfigError("invalid proxy port") from exc
+    if not 1 <= port <= 65535:
+        raise ProxyConfigError("proxy port out of range")
+    return port
 
 
-def parse_hysteria2(parsed, params):
-    outbound = {
-        "type": "hysteria2",
-        "tag": "proxy",
-        "server": parsed.hostname,
-        "server_port": parsed.port or 443,
-        "password": unquote(parsed.username or ""),
-    }
-
-    tls = {"enabled": True}
-    sni = params.get("sni", [""])[0]
-    if sni:
-        tls["server_name"] = sni
-    insecure = params.get("insecure", params.get("allowInsecure", ["0"]))[0]
-    if insecure == "1":
-        tls["insecure"] = True
-    alpn = params.get("alpn", [""])[0]
-    if alpn:
-        tls["alpn"] = alpn.split(",")
-    outbound["tls"] = tls
-
-    # Obfuscation (optional)
-    obfs = params.get("obfs", [""])[0]
-    if obfs:
-        obfs_pwd = params.get("obfs-password", [""])[0]
-        outbound["obfs"] = {"type": obfs, "password": obfs_pwd}
-
-    return outbound
-
-
-def parse_anytls(parsed, params):
-    """Translate anytls:// URI to a sing-box anytls outbound."""
-    outbound = {
-        "type": "anytls",
-        "tag": "proxy",
-        "server": parsed.hostname,
-        "server_port": parsed.port or 443,
-        "password": unquote(parsed.username or ""),
-    }
-    tls = {"enabled": True}
+def _tls(params, *, required=True):
+    tls = {"enabled": required}
     sni = params.get("sni", [""])[0]
     if sni:
         tls["server_name"] = sni
     fp = params.get("fp", params.get("client-fingerprint", [""]))[0]
     if fp:
         tls["utls"] = {"enabled": True, "fingerprint": fp}
+    alpn = params.get("alpn", [""])[0]
+    if alpn:
+        tls["alpn"] = [part for part in alpn.split(",") if part]
     insecure = params.get("insecure", params.get("allowInsecure", ["0"]))[0]
+    if insecure not in ("0", "1"):
+        raise ProxyConfigError("insecure must be 0 or 1")
     if insecure == "1":
+        if os.environ.get("ALLOW_INSECURE_PROXY", "").lower() not in ("1", "true", "yes"):
+            raise ProxyConfigError("insecure proxy requires ALLOW_INSECURE_PROXY=1")
         tls["insecure"] = True
-    outbound["tls"] = tls
+    return tls
+
+
+def parse_socks5(parsed):
+    host, _ = _host(parsed)
+    outbound = {"type": "socks", "tag": "proxy", "server": host, "server_port": _port(parsed, 1080), "version": "5"}
+    if parsed.username is not None:
+        outbound["username"] = _required(unquote(parsed.username), "SOCKS username")
+    if parsed.password is not None:
+        outbound["password"] = _required(unquote(parsed.password), "SOCKS password")
     return outbound
 
 
+def parse_http(parsed):
+    host, _ = _host(parsed)
+    outbound = {"type": "http", "tag": "proxy", "server": host, "server_port": _port(parsed, 8080)}
+    if parsed.username is not None:
+        outbound["username"] = _required(unquote(parsed.username), "HTTP username")
+    if parsed.password is not None:
+        outbound["password"] = _required(unquote(parsed.password), "HTTP password")
+    if parsed.scheme == "https":
+        outbound["tls"] = _tls({}, required=True)
+    return outbound
+
+
+def parse_vless(parsed, params):
+    host, _ = _host(parsed)
+    uuid = _required(unquote(parsed.username or ""), "VLESS UUID")
+    if not _UUID_RE.fullmatch(uuid):
+        raise ProxyConfigError("invalid VLESS UUID")
+    outbound = {"type": "vless", "tag": "proxy", "server": host, "server_port": _port(parsed, 443), "uuid": uuid}
+    flow = params.get("flow", [""])[0]
+    if flow:
+        outbound["flow"] = flow
+    security = params.get("security", [""])[0]
+    if security in ("tls", "reality"):
+        tls = _tls(params)
+        if security == "reality":
+            pbk = _required(params.get("pbk", [""])[0], "Reality public key")
+            tls["reality"] = {"enabled": True, "public_key": pbk}
+            sid = params.get("sid", [""])[0]
+            if sid:
+                tls["reality"]["short_id"] = sid
+        outbound["tls"] = tls
+    elif security not in ("", "none"):
+        raise ProxyConfigError("unsupported VLESS security")
+    _add_transport(outbound, params)
+    return outbound
+
+
+def _add_transport(outbound, params):
+    net_type = params.get("type", [""])[0]
+    if net_type == "ws":
+        transport = {"type": "ws"}
+        if params.get("path", [""])[0]:
+            transport["path"] = unquote(params["path"][0])
+        if params.get("host", [""])[0]:
+            transport["headers"] = {"Host": params["host"][0]}
+        outbound["transport"] = transport
+    elif net_type == "grpc":
+        transport = {"type": "grpc"}
+        if params.get("serviceName", [""])[0]:
+            transport["service_name"] = params["serviceName"][0]
+        outbound["transport"] = transport
+    elif net_type in ("http", "h2"):
+        transport = {"type": "http"}
+        if params.get("path", [""])[0]:
+            transport["path"] = unquote(params["path"][0])
+        if params.get("host", [""])[0]:
+            transport["host"] = [params["host"][0]]
+        outbound["transport"] = transport
+    elif net_type:
+        raise ProxyConfigError("unsupported proxy transport")
+
+
+def parse_vmess(url_str):
+    encoded = url_str[len("vmess://"):]
+    try:
+        decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4), validate=True).decode("utf-8")
+        cfg = json.loads(decoded)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProxyConfigError("invalid VMess payload") from exc
+    if not isinstance(cfg, dict):
+        raise ProxyConfigError("invalid VMess schema")
+    host = _required(cfg.get("add"), "VMess server")
+    uuid = _required(cfg.get("id"), "VMess UUID")
+    if not _UUID_RE.fullmatch(uuid):
+        raise ProxyConfigError("invalid VMess UUID")
+    try:
+        port = int(cfg.get("port", 443))
+        alter_id = int(cfg.get("aid", 0))
+    except (TypeError, ValueError) as exc:
+        raise ProxyConfigError("invalid VMess numeric field") from exc
+    if not 1 <= port <= 65535 or alter_id < 0:
+        raise ProxyConfigError("invalid VMess numeric field")
+    outbound = {"type": "vmess", "tag": "proxy", "server": host, "server_port": port, "uuid": uuid, "security": cfg.get("scy", "auto"), "alter_id": alter_id}
+    if cfg.get("tls") == "tls":
+        tls = {"enabled": True}
+        if cfg.get("sni") or cfg.get("host"):
+            tls["server_name"] = cfg.get("sni") or cfg.get("host")
+        if cfg.get("alpn"):
+            tls["alpn"] = str(cfg["alpn"]).split(",")
+        outbound["tls"] = tls
+    _add_transport(outbound, {"type": [cfg.get("net", "tcp")], "path": [cfg.get("path", "")], "host": [cfg.get("host", "")], "serviceName": [cfg.get("path", "")]})
+    return outbound
+
+
+def _parse_password_tls(parsed, params, protocol):
+    host, _ = _host(parsed)
+    password = _required(unquote(parsed.username or ""), f"{protocol} password")
+    outbound = {"type": protocol, "tag": "proxy", "server": host, "server_port": _port(parsed, 443), "password": password, "tls": _tls(params)}
+    return outbound
+
+
+def parse_hysteria2(parsed, params):
+    outbound = _parse_password_tls(parsed, params, "hysteria2")
+    obfs = params.get("obfs", [""])[0]
+    if obfs:
+        outbound["obfs"] = {"type": obfs, "password": _required(params.get("obfs-password", [""])[0], "obfs password")}
+    return outbound
+
+
+def parse_anytls(parsed, params):
+    return _parse_password_tls(parsed, params, "anytls")
+
+
 def parse_trojan(parsed, params):
-    """Translate trojan:// URI to a sing-box trojan outbound."""
-    outbound = {
-        "type": "trojan",
-        "tag": "proxy",
-        "server": parsed.hostname,
-        "server_port": parsed.port or 443,
-        "password": unquote(parsed.username or ""),
-    }
-    tls = {"enabled": True}
-    sni = params.get("sni", [""])[0]
-    if sni:
-        tls["server_name"] = sni
-    insecure = params.get("insecure", params.get("allowInsecure", ["0"]))[0]
-    if insecure == "1":
-        tls["insecure"] = True
-    alpn = params.get("alpn", [""])[0]
-    if alpn:
-        tls["alpn"] = alpn.split(",")
-    outbound["tls"] = tls
-    transport = params.get("type", [""])[0]
-    if transport == "ws":
-        ws = {"type": "ws"}
-        path = params.get("path", [""])[0]
-        if path:
-            ws["path"] = unquote(path)
-        host = params.get("host", [""])[0]
-        if host:
-            ws["headers"] = {"Host": host}
-        outbound["transport"] = ws
+    outbound = _parse_password_tls(parsed, params, "trojan")
+    _add_transport(outbound, params)
     return outbound
 
 
 def parse_tuic(parsed, params):
-    outbound = {
-        "type": "tuic",
-        "tag": "proxy",
-        "server": parsed.hostname,
-        "server_port": parsed.port or 443,
-        "uuid": "",
-        "password": "",
-        "congestion_control": params.get("congestion_control", ["bbr"])[0],
-    }
-
-    user_part = unquote(parsed.username or "")
-    pass_part = unquote(parsed.password or "")
-
-    if ":" in user_part and not pass_part:
-        outbound["uuid"], outbound["password"] = user_part.split(":", 1)
-    else:
-        outbound["uuid"] = user_part
-        outbound["password"] = pass_part
-
-    tls = {"enabled": True}
-    sni = params.get("sni", [""])[0]
-    if sni:
-        tls["server_name"] = sni
-    insecure = params.get("insecure", params.get("allowInsecure", ["0"]))[0]
-    if insecure == "1":
-        tls["insecure"] = True
-    alpn = params.get("alpn", [""])[0]
-    if alpn:
-        tls["alpn"] = alpn.split(",")
-    outbound["tls"] = tls
-
+    host, _ = _host(parsed)
+    user = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+    if not password and ":" in user:
+        user, password = user.split(":", 1)
+    uuid = _required(user, "TUIC UUID")
+    password = _required(password, "TUIC password")
+    if not _UUID_RE.fullmatch(uuid):
+        raise ProxyConfigError("invalid TUIC UUID")
+    outbound = {"type": "tuic", "tag": "proxy", "server": host, "server_port": _port(parsed, 443), "uuid": uuid, "password": password, "congestion_control": params.get("congestion_control", ["bbr"])[0], "tls": _tls(params)}
     return outbound
 
 
-# ============================================================
-# Main
-# ============================================================
-
 def _parse_proxy_url(proxy_url):
-    scheme = proxy_url.split("://")[0].lower()
+    if not isinstance(proxy_url, str) or "://" not in proxy_url:
+        raise ProxyConfigError("proxy URI must include a scheme")
+    scheme = proxy_url.split("://", 1)[0].lower()
     if scheme == "vmess":
         return scheme, parse_vmess(proxy_url)
     parsed = urlparse(proxy_url)
-    params = parse_qs(parsed.query)
-    if scheme == "socks5":
-        outbound = parse_socks5(parsed)
-    elif scheme in ("http", "https"):
-        outbound = parse_http(parsed)
-    elif scheme == "vless":
-        outbound = parse_vless(parsed, params)
-    elif scheme in ("hy2", "hysteria2"):
-        outbound = parse_hysteria2(parsed, params)
-    elif scheme == "trojan":
-        outbound = parse_trojan(parsed, params)
-    elif scheme == "anytls":
-        outbound = parse_anytls(parsed, params)
-    elif scheme == "tuic":
-        outbound = parse_tuic(parsed, params)
-    else:
-        print(f"Unsupported protocol: {scheme}")
-        sys.exit(1)
-    return scheme, outbound
+    if parsed.scheme.lower() != scheme:
+        raise ProxyConfigError("invalid proxy URI")
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    parsers = {
+        "socks5": parse_socks5,
+        "http": parse_http,
+        "https": parse_http,
+        "vless": parse_vless,
+        "hy2": parse_hysteria2,
+        "hysteria2": parse_hysteria2,
+        "trojan": parse_trojan,
+        "anytls": parse_anytls,
+        "tuic": parse_tuic,
+    }
+    parser = parsers.get(scheme)
+    if not parser:
+        raise ProxyConfigError(f"unsupported proxy protocol: {scheme}")
+    return scheme, parser(parsed, params) if scheme in ("vless", "hy2", "hysteria2", "trojan", "anytls", "tuic") else parser(parsed)
+
+
+def _write_config(config, path="config.json"):
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, temporary = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=directory, text=True)
+    try:
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(config, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def main():
     proxy_url = os.environ.get("PROXY_URL", "").strip()
     if not proxy_url:
         print("PROXY_URL is empty, skipping sing-box config generation.")
-        sys.exit(0)
-
-    scheme = proxy_url.split("://")[0].lower()
-    print(f"Parsing proxy URI ({scheme}://***)")
-    scheme, outbound = _parse_proxy_url(proxy_url)
-
-    # PROXY_CHAIN_URL：出口可选再套一层 HTTP/SOCKS 二跳代理
-    chain_url = os.environ.get("PROXY_CHAIN_URL", "").strip()
-    outbounds = [outbound, {"type": "direct", "tag": "direct"}]
-    if chain_url:
-        chain_scheme, chain_ob = _parse_proxy_url(chain_url)
-        outbound["tag"] = "dialer"
-        chain_ob["tag"] = "proxy"
-        chain_ob["detour"] = "dialer"
-        outbounds = [outbound, chain_ob, {"type": "direct", "tag": "direct"}]
-        print(f"  Chain mode: {scheme} -> {chain_scheme}://{chain_ob.get('server')}:{chain_ob.get('server_port')}")
-
-    config = {
-        "log": {"level": "info", "timestamp": True},
-        "inbounds": [
-            {
-                "type": "http",
-                "tag": "http-in",
-                "listen": LISTEN_HOST,
-                "listen_port": LISTEN_PORT,
-            }
-        ],
-        "outbounds": outbounds,
-        # Without this, curl through the HTTP inbound has no outbound to use.
-        "route": {"final": "proxy"},
-    }
-
-    with open("config.json", "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-
-    server = outbound.get("server", "N/A")
-    port = outbound.get("server_port", "N/A")
-    print(f"sing-box config.json generated.")
-    print(f"  Inbound: http://{LISTEN_HOST}:{LISTEN_PORT}")
-    print(f"  Outbound: {outbound['type']} -> {server}:{port}")
+        return 0
+    try:
+        scheme, outbound = _parse_proxy_url(proxy_url)
+        outbounds = [outbound, {"type": "direct", "tag": "direct"}]
+        chain_url = os.environ.get("PROXY_CHAIN_URL", "").strip()
+        if chain_url:
+            chain_scheme, chain = _parse_proxy_url(chain_url)
+            outbound["tag"] = "dialer"
+            chain["tag"] = "proxy"
+            chain["detour"] = "dialer"
+            outbounds = [outbound, chain, {"type": "direct", "tag": "direct"}]
+            print(f"Chain mode: {scheme} -> {chain_scheme}")
+        config = {
+            "log": {"level": "info", "timestamp": True},
+            "inbounds": [{"type": "http", "tag": "http-in", "listen": LISTEN_HOST, "listen_port": LISTEN_PORT}],
+            "outbounds": outbounds,
+            "route": {"final": "proxy"},
+        }
+        _write_config(config)
+        print(f"sing-box config generated ({scheme}); inbound http://{LISTEN_HOST}:{LISTEN_PORT}")
+        return 0
+    except ProxyConfigError as exc:
+        print(f"Invalid proxy configuration: {exc}")
+        return 1
+    except OSError as exc:
+        print(f"Unable to write proxy configuration: {exc.__class__.__name__}")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

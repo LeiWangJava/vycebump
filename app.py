@@ -20,6 +20,9 @@ import time
 import ssl
 import subprocess
 import datetime
+import html
+import ipaddress
+import re
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -52,6 +55,47 @@ ONE_DAY_MS = 24 * ONE_HOUR_MS
 # ============================================================
 # HTTP 请求辅助函数 (原生 urllib 实现，支持代理与 SSL)
 # ============================================================
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlsplit(req.full_url)
+        new = urllib.parse.urlsplit(urllib.parse.urljoin(req.full_url, newurl))
+        try:
+            old_port = old.port or (443 if old.scheme.lower() == "https" else 80)
+            new_port = new.port or (443 if new.scheme.lower() == "https" else 80)
+        except ValueError:
+            old_port = new_port = None
+        old_origin = (old.scheme.lower(), (old.hostname or "").lower(), old_port)
+        new_origin = (new.scheme.lower(), (new.hostname or "").lower(), new_port)
+        if old_origin != new_origin or old.scheme.lower() != "https" or new.scheme.lower() != "https":
+            raise urllib.error.HTTPError(req.full_url, code, "Unsafe redirect rejected", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def safe_error_text(value: str, limit: int = 240) -> str:
+    text = str(value or "")
+    text = re.sub(r"(?i)(__Host-vyce_sid\s*=\s*)[^\s&\"']+", r"\1[redacted]", text)
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]+=*", r"\1[redacted]", text)
+    text = re.sub(r"(?i)(token|password|secret|authorization)(\s*[=:]\s*)[^\s,;\"']+", r"\1\2[redacted]", text)
+    text = re.sub(r"(?i)(https?://)[^/@\s]+:[^/@\s]+@", r"\1[redacted]@", text)
+    text = " ".join(text.split())
+    return text[:limit]
+
+
+def _error_message(body: str, fallback: str) -> str:
+    try:
+        data = json.loads(body)
+    except (TypeError, ValueError):
+        if isinstance(body, str) and body.startswith("Request Exception:"):
+            return safe_error_text(body, 120)
+        return fallback
+    if isinstance(data, dict):
+        for key in ("message", "error", "code"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return safe_error_text(value)
+    return fallback
+
+
 def http_request(
     url: str,
     method: str = "GET",
@@ -64,9 +108,13 @@ def http_request(
     通用 HTTP 请求封装
     返回: (status_code, response_headers, response_body_text)
     """
-    handlers = []
+    # Always install an explicit proxy handler so ambient proxy environment
+    # variables cannot silently reroute local CDP or API requests.
     if proxy:
-        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy})]
+    else:
+        handlers = [urllib.request.ProxyHandler({})]
+    handlers.append(SafeRedirectHandler())
 
     # 使用系统标准 CA 证书校验 HTTPS，防范中间人攻击
     ctx = ssl.create_default_context()
@@ -86,10 +134,13 @@ def http_request(
             body = resp.read().decode("utf-8", errors="replace")
             return status, resp_headers, body
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        return e.code, dict(e.headers), body
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        return e.code, dict(e.headers or {}), body
     except Exception as e:
-        return 0, {}, f"Request Exception: {str(e)}"
+        return 0, {}, f"Request Exception: {safe_error_text(e)}"
 
 
 # ============================================================
@@ -126,27 +177,26 @@ def send_tg_message(
     ).strftime("%Y-%m-%d %H:%M:%S")
 
     masked_acc = mask_username(account_name)
+    escape = lambda value: html.escape(safe_error_text(value, 120), quote=True)
     lines = [
         "🇪🇺 <b>Vyce.cloud 续期通知</b>",
         "",
-        f"{status_icon} <b>{status_title}</b>",
-        f"👤 账户: <code>{masked_acc}</code>",
+        f"{escape(status_icon)} <b>{escape(status_title)}</b>",
+        f"👤 账户: <code>{escape(masked_acc)}</code>",
     ]
 
     if details:
         if details.get("server_name"):
-            lines.append(f"🖥️ 服务器: <code>{details['server_name']}</code>")
+            lines.append(f"🖥️ 服务器: <code>{escape(details['server_name'])}</code>")
         if details.get("plan_id"):
-            lines.append(f"📦 规格: {details['plan_id']} ({details.get('os', '')})")
-        if details.get("ipv6"):
-            lines.append(f"🌐 IPv6: <code>{details['ipv6']}</code>")
+            lines.append(f"📦 规格: {escape(details['plan_id'])} ({escape(details.get('os', ''))})")
         if details.get("time_left_str"):
-            lines.append(f"⏳ 剩余存活: <b>{details['time_left_str']}</b>")
+            lines.append(f"⏳ 剩余存活: <b>{escape(details['time_left_str'])}</b>")
         if details.get("next_renewal_str"):
-            lines.append(f"⏰ 续期时间窗口: {details['next_renewal_str']}")
+            lines.append(f"⏰ 续期时间窗口: {escape(details['next_renewal_str'])}")
 
     if error_msg:
-        lines.append(f"⚠️ 详情: {error_msg}")
+        lines.append(f"⚠️ 详情: {escape(error_msg)}")
 
     lines.append(f"⏱️ 报告时间: {beijing_time} (UTC+8)")
 
@@ -164,84 +214,110 @@ def send_tg_message(
     if status == 200:
         print("📩 Telegram 通知发送成功！")
     else:
-        print(f"⚠️ Telegram 发送失败 ({status}): {res}")
+        print(f"⚠️ Telegram 发送失败 ({status}): {safe_error_text(_error_message(res, 'request failed'))}")
 
 
 # ============================================================
 # 本地 Chrome CDP Cookie 提取
 # ============================================================
+def _loopback_cdp_endpoint(value: str) -> Optional[urllib.parse.SplitResult]:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme.lower() != "http" or parsed.username or parsed.password:
+            return None
+        if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+            return None
+        host = parsed.hostname
+        if not host or not ipaddress.ip_address(host).is_loopback:
+            return None
+        port = parsed.port or 9222
+        if not 1 <= port <= 65535:
+            return None
+        return parsed
+    except (ValueError, TypeError):
+        return None
+
+
 def get_cookie_from_cdp(cdp_base_url: str = CDP_URL) -> Optional[str]:
-    """通过本地 Chrome 9222 CDP 接口自动提取活跃的 __Host-vyce_sid Cookie"""
-    json_url = f"{cdp_base_url.rstrip('/')}/json"
+    """通过受限的本地 Chrome CDP 接口提取 Vyce Session Cookie。"""
+    endpoint = _loopback_cdp_endpoint(cdp_base_url)
+    if not endpoint:
+        print("⚠️ 拒绝不安全的 CDP_URL：仅允许无凭据的 loopback HTTP endpoint。")
+        return None
+    host = endpoint.hostname.lower()
+    port = endpoint.port or 9222
+    json_url = f"http://{host}:{port}/json"
     status, _, body = http_request(json_url, timeout=3)
     if status != 200:
         return None
 
     try:
         tabs = json.loads(body)
-    except Exception:
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(tabs, list):
         return None
 
-    # 寻找 vyce.cloud 相关的 tab
     target_tab = None
     for tab in tabs:
-        url = tab.get("url", "")
-        if "vyce.cloud" in url and tab.get("webSocketDebuggerUrl"):
+        if not isinstance(tab, dict) or tab.get("type") != "page":
+            continue
+        try:
+            page = urllib.parse.urlsplit(tab.get("url", ""))
+            ws = urllib.parse.urlsplit(tab.get("webSocketDebuggerUrl", ""))
+            ws_port = ws.port or (443 if ws.scheme.lower() == "wss" else 80)
+        except ValueError:
+            continue
+        if (page.scheme.lower() == "https" and page.hostname == "vyce.cloud"
+                and ws.scheme.lower() == "ws" and ws.hostname == host
+                and ws_port == port and ws.username is None and ws.password is None
+                and ws.path.startswith("/devtools/page/")):
             target_tab = tab
             break
 
-    if not target_tab and tabs:
-        for tab in tabs:
-            if tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"):
-                target_tab = tab
-                break
-
     if not target_tab:
         return None
+    ws_url = target_tab["webSocketDebuggerUrl"]
 
-    ws_url = target_tab.get("webSocketDebuggerUrl", "")
-    if not ws_url or not (ws_url.startswith("ws://") or ws_url.startswith("wss://")):
-        return None
-
-    # 利用本地 node 执行单次 WebSocket 提取，通过命令行参数传递 wsUrl，防止代码插值注入
     node_code = """
     const wsUrl = process.argv[1];
-    if (!wsUrl) process.exit(1);
+    if (!wsUrl) process.exit(2);
     const ws = new WebSocket(wsUrl);
+    let finished = false;
+    const fail = (code) => { if (!finished) { finished = true; process.exit(code); } };
     ws.addEventListener("open", () => {
-      ws.send(JSON.stringify({
-        id: 1,
-        method: "Network.getCookies",
-        params: { urls: ["https://vyce.cloud"] }
-      }));
+      ws.send(JSON.stringify({id: 1, method: "Network.getCookies", params: {urls: ["https://vyce.cloud"]}}));
     });
     ws.addEventListener("message", (event) => {
-      const res = JSON.parse(event.data);
-      const cookies = res.result?.cookies || [];
-      const target = cookies.find(c => c.name === "__Host-vyce_sid");
-      if (target) console.log("__Host-vyce_sid=" + target.value);
+      let res;
+      try { res = JSON.parse(event.data); } catch { return fail(3); }
+      if (res.id !== 1) return;
+      if (res.error || !res.result || !Array.isArray(res.result.cookies)) return fail(4);
+      const target = res.result.cookies.find(c => c && c.name === "__Host-vyce_sid" && typeof c.value === "string" && c.value.length > 0);
+      if (target) process.stdout.write("__Host-vyce_sid=" + target.value);
+      finished = true;
       ws.close();
-      process.exit(0);
+      process.exit(target ? 0 : 5);
     });
-    ws.addEventListener("error", () => {
-      process.exit(1);
-    });
+    ws.addEventListener("error", () => fail(6));
+    setTimeout(() => fail(7), 6000);
     """
     try:
         p = subprocess.run(
             ["node", "--input-type=module", "-e", node_code, ws_url],
             capture_output=True,
             text=True,
-            timeout=8
+            timeout=8,
         )
         out = p.stdout.strip()
-        if "__Host-vyce_sid=" in out:
+        if p.returncode == 0 and re.fullmatch(r"__Host-vyce_sid=[^\s]+", out):
             return out
     except FileNotFoundError:
         print("ℹ️ 本地环境未检测到 node 命令，跳过 CDP WebSocket 自动化提取。")
-    except Exception as e:
-        print(f"⚠️ CDP 提取异常: {e}")
-
+    except subprocess.TimeoutExpired:
+        print("⚠️ CDP 提取超时。")
+    except OSError:
+        print("⚠️ CDP 提取进程启动失败。")
     return None
 
 
@@ -343,51 +419,64 @@ class VyceClient:
             "Referer": f"{BASE_URL}/",
             "Cookie": cookie,
         }
+        self.last_error = ""
 
     def get_me(self) -> Optional[Dict]:
         """获取当前用户信息: GET /api/me"""
-        url = f"{API_BASE}/me"
-        status, _, body = http_request(url, headers=self.headers, proxy=self.proxy, timeout=15)
+        status, _, body = http_request(f"{API_BASE}/me", headers=self.headers, proxy=self.proxy, timeout=15)
         if status == 200:
             try:
                 data = json.loads(body)
-                return data.get("user")
-            except Exception:
+            except (TypeError, ValueError):
+                self.last_error = "Invalid JSON response"
                 return None
-        print(f"⚠️ GET /api/me 失败 (HTTP {status}): {body}")
+            user = data.get("user") if isinstance(data, dict) else None
+            if isinstance(user, dict) and isinstance(user.get("login"), str):
+                return user
+            self.last_error = "Invalid user response schema"
+            return None
+        self.last_error = _error_message(body, f"HTTP {status or 'network error'}")
         return None
 
-    def get_servers(self) -> List[Dict]:
-        """获取服务器列表: GET /api/servers"""
-        url = f"{API_BASE}/servers"
-        status, _, body = http_request(url, headers=self.headers, proxy=self.proxy, timeout=15)
+    def get_servers(self) -> Optional[List[Dict]]:
+        """Return a server list, [] for valid empty results, or None on failure."""
+        status, _, body = http_request(f"{API_BASE}/servers", headers=self.headers, proxy=self.proxy, timeout=15)
         if status == 200:
             try:
                 data = json.loads(body)
-                return data.get("servers", [])
-            except Exception:
-                return []
-        print(f"⚠️ GET /api/servers 失败 (HTTP {status}): {body}")
-        return []
+            except (TypeError, ValueError):
+                self.last_error = "Invalid JSON response"
+                return None
+            servers = data.get("servers") if isinstance(data, dict) else None
+            if not isinstance(servers, list) or any(not isinstance(server, dict) for server in servers):
+                self.last_error = "Invalid servers response schema"
+                return None
+            for server in servers:
+                if (not isinstance(server.get("id"), str) or not server["id"]
+                        or not isinstance(server.get("source"), str)
+                        or not isinstance(server.get("status"), str)
+                        or not isinstance(server.get("expiresAt"), (int, float))):
+                    self.last_error = "Invalid server record schema"
+                    return None
+            return servers
+        self.last_error = _error_message(body, f"HTTP {status or 'network error'}")
+        return None
 
     def renew_server(self, server_id: str) -> Tuple[bool, int, str]:
-        """
-        续期服务器: POST /api/servers/{id}/renew
-        返回: (成功布尔值, HTTP状态码, 响应消息)
-        """
-        url = f"{API_BASE}/servers/{server_id}/renew"
+        """Return success, HTTP status, and a bounded non-sensitive message."""
+        url = f"{API_BASE}/servers/{urllib.parse.quote(server_id, safe='')}/renew"
         status, _, body = http_request(url, method="POST", headers=self.headers, proxy=self.proxy, timeout=20)
-        try:
-            res_json = json.loads(body)
-        except Exception:
-            res_json = {}
-
         if status in (200, 204):
-            msg = res_json.get("message") or "Renewed successfully"
-            return True, status, msg
-
-        msg = res_json.get("message") or res_json.get("error") or body
-        return False, status, msg
+            if status == 204 or not body.strip():
+                return True, status, "Renewed successfully"
+            try:
+                response = json.loads(body)
+            except (TypeError, ValueError):
+                return False, status, "Invalid renewal response JSON"
+            if isinstance(response, dict) and response.get("success") is not False:
+                return True, status, safe_error_text(response.get("message") or "Renewed successfully")
+            return False, status, _error_message(body, "Invalid renewal response schema")
+        return False, status, _error_message(body, f"HTTP {status or 'network error'}")
 
 
 # ============================================================
@@ -403,12 +492,17 @@ def load_state() -> Dict:
     return {}
 
 
-def save_state(state: Dict):
+def save_state(state: Dict) -> bool:
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        temporary = f"{STATE_FILE}.tmp"
+        with open(temporary, "w", encoding="utf-8") as f:
+            os.chmod(temporary, 0o600)
             json.dump(state, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"⚠️ 保存状态文件失败: {e}")
+        os.replace(temporary, STATE_FILE)
+        return True
+    except OSError as e:
+        print(f"⚠️ 保存状态文件失败: {safe_error_text(e)}")
+        return False
 
 
 def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> bool:
@@ -428,15 +522,26 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
             status_icon="❌",
             status_title="Cookie 失效 / 登录失败",
             account_name=account_label,
-            error_msg="无法通过 /api/me 获取用户信息，请检查或重新获取 __Host-vyce_sid。",
-            proxy=proxy
+            error_msg=client.last_error or "无法通过 /api/me 获取用户信息。",
+            proxy=proxy,
         )
         return False
 
     real_username = user_info.get("login") or account_label
-    print(f"✅ 登录成功！用户: {real_username} (ID: {user_info.get('id')})")
+    print(f"✅ 登录成功！用户: {mask_username(real_username)}")
 
     servers = client.get_servers()
+    if servers is None:
+        error = client.last_error or "无法读取服务器列表"
+        print(f"❌ 获取服务器列表失败: {error}")
+        send_tg_message(
+            status_icon="❌",
+            status_title="服务器列表读取失败",
+            account_name=real_username,
+            error_msg=error,
+            proxy=proxy,
+        )
+        return False
     if not servers:
         print("ℹ️ 该账户名下无任何服务器。")
         return True
@@ -445,16 +550,15 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
     account_ok = True
 
     for srv in servers:
-        srv_id = srv.get("id")
-        srv_name = srv.get("name", "Unnamed")
-        source = srv.get("source", "")
-        plan_id = srv.get("planId", "")
-        status = srv.get("status", "")
-        ipv6 = srv.get("ipv6", "无")
-        expires_at = srv.get("expiresAt") or 0
+        srv_id = srv["id"]
+        srv_name = safe_error_text(srv.get("name") or "Unnamed", 80)
+        source = srv["source"]
+        plan_id = safe_error_text(srv.get("planId") or "", 40)
+        status = srv["status"]
+        expires_at = srv["expiresAt"]
 
-        print(f"\n🖥️ 检查服务器: {srv_name} ({srv_id})")
-        print(f"   类型: {source} ({plan_id}) | 状态: {status} | IPv6: {ipv6}")
+        print(f"\n🖥️ 检查服务器: {srv_name}")
+        print(f"   类型: {source} ({plan_id}) | 状态: {safe_error_text(status, 40)}")
 
         # 仅针对免费服务器执行 24h 续期逻辑
         if source != "free":
@@ -484,7 +588,6 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
             "server_name": srv_name,
             "plan_id": plan_id,
             "os": srv.get("os", ""),
-            "ipv6": ipv6,
             "time_left_str": time_left_str,
             "next_renewal_str": next_avail_str,
         }
@@ -516,13 +619,52 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
             print(f"   🎉 续期成功！({msg})")
             # 重新拉取服务器最新状态
             fresh_servers = client.get_servers()
+            if fresh_servers is None:
+                error = client.last_error or "续期后无法刷新服务器状态"
+                print(f"   ⚠️ 续期请求已接受，但状态刷新失败: {error}")
+                account_ok = False
+                state[srv_id] = {
+                    "name": srv_name,
+                    "user": real_username,
+                    "status": "renewed_unverified",
+                    "error": error,
+                    "last_check_ts": now_ms,
+                }
+                send_tg_message(
+                    status_icon="⚠️",
+                    status_title="续期成功但状态未验证",
+                    account_name=real_username,
+                    details=details,
+                    error_msg=error,
+                    proxy=proxy,
+                )
+                continue
             fresh_srv = next((s for s in fresh_servers if s.get("id") == srv_id), None)
-            if fresh_srv:
-                new_expires = fresh_srv.get("expiresAt") or 0
-                new_left_sec = (new_expires - now_ms) / 1000.0
-                details["time_left_str"] = format_duration(new_left_sec)
-                details["next_renewal_str"] = ms_to_beijing_str(now_ms + ONE_DAY_MS)
-                print(f"   ✨ 机器存活已重置为: {details['time_left_str']} (到期: {ms_to_beijing_str(new_expires)})")
+            if not fresh_srv or not isinstance(fresh_srv.get("expiresAt"), (int, float)):
+                error = "续期后响应中未找到服务器"
+                print(f"   ⚠️ 续期请求已接受，但无法验证服务器状态。")
+                account_ok = False
+                state[srv_id] = {
+                    "name": srv_name,
+                    "user": real_username,
+                    "status": "renewed_unverified",
+                    "error": error,
+                    "last_check_ts": now_ms,
+                }
+                send_tg_message(
+                    status_icon="⚠️",
+                    status_title="续期成功但状态未验证",
+                    account_name=real_username,
+                    details=details,
+                    error_msg=error,
+                    proxy=proxy,
+                )
+                continue
+            new_expires = fresh_srv["expiresAt"]
+            new_left_sec = (new_expires - now_ms) / 1000.0
+            details["time_left_str"] = format_duration(new_left_sec)
+            details["next_renewal_str"] = ms_to_beijing_str(now_ms + ONE_DAY_MS)
+            print(f"   ✨ 机器存活已重置为: {details['time_left_str']} (到期: {ms_to_beijing_str(new_expires)})")
 
             state[srv_id] = {
                 "name": srv_name,
@@ -540,26 +682,28 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
                 status_title="Vyce VPS 续期成功",
                 account_name=real_username,
                 details=details,
-                proxy=proxy
+                proxy=proxy,
             )
         else:
-            if code == 429:
-                print(f"   ⏳ 官方服务端提示冷却未完成 (429): {msg}")
+            expected_cooldown = code == 429 and msg == "renewal_cooldown"
+            if expected_cooldown:
+                print(f"   ⏳ 官方服务端提示冷却未完成 (429): {safe_error_text(msg)}")
                 state[srv_id] = {
                     "name": srv_name,
                     "user": real_username,
                     "status": "cooldown_429",
-                    "msg": msg,
+                    "msg": safe_error_text(msg),
+                    "next_renewal_ts": next_avail_ts,
                     "last_check_ts": now_ms,
                 }
             else:
-                print(f"   ❌ 续期失败 (HTTP {code}): {msg}")
+                print(f"   ❌ 续期失败 (HTTP {code}): {safe_error_text(msg)}")
                 account_ok = False
                 state[srv_id] = {
                     "name": srv_name,
                     "user": real_username,
                     "status": "failed",
-                    "error": msg,
+                    "error": safe_error_text(msg),
                     "last_check_ts": now_ms,
                 }
                 send_tg_message(
@@ -567,8 +711,8 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
                     status_title="Vyce VPS 续期失败",
                     account_name=real_username,
                     details=details,
-                    error_msg=f"HTTP {code}: {msg}",
-                    proxy=proxy
+                    error_msg=f"HTTP {code}: {safe_error_text(msg)}",
+                    proxy=proxy,
                 )
 
     return account_ok
@@ -582,7 +726,13 @@ def main():
 
     proxy_server = os.environ.get("PROXY_SERVER") or os.environ.get("https_proxy") or os.environ.get("http_proxy")
     if proxy_server:
-        print(f"🌐 使用代理出口: {proxy_server}")
+        try:
+            parsed_proxy = urllib.parse.urlsplit(proxy_server)
+            host = parsed_proxy.hostname or "?"
+            port = parsed_proxy.port or "?"
+            print(f"🌐 使用代理出口: {parsed_proxy.scheme or 'unknown'}://{host}:{port}")
+        except ValueError:
+            print("🌐 使用代理出口: [invalid proxy configuration]")
 
     accounts = load_accounts()
     if not accounts:
@@ -602,10 +752,11 @@ def main():
             if not ok:
                 all_success = False
         except Exception as e:
-            print(f"❌ 处理账户 {acc.get('name')} 时出现未捕获异常: {e}")
+            print(f"❌ 处理账户 {mask_username(acc.get('name', ''))} 时出现未捕获异常: {safe_error_text(e)}")
             all_success = False
 
-    save_state(state)
+    if not save_state(state):
+        all_success = False
     print(f"\n✅ 任务处理完毕，状态已保存至 {STATE_FILE}。")
     if not all_success:
         print("❌ 检测到有账户处理失败或续期异常，以非零状态码退出 (exit 1)。")

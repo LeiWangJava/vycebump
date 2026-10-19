@@ -124,7 +124,10 @@ class TestCooldownAndRenewalLogic(unittest.TestCase):
             "ipv6": "2a01::2",
             "expiresAt": now_ms + int(12 * ONE_HOUR_MS),
         }
-        client.get_servers.return_value = [server_obj]
+        client.get_servers.side_effect = [
+            [server_obj],
+            [dict(server_obj, expiresAt=now_ms + int(48 * ONE_HOUR_MS))],
+        ]
         client.renew_server.return_value = (True, 200, "Renewed successfully")
         mock_client_cls.return_value = client
 

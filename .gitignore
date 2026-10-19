@@ -5,6 +5,10 @@ __pycache__/
 config.json
 sing-box*
 renew_state.json
+login.json
+*.secret.json
+.env
+.env.*
 .DS_Store
 .venv/
 venv/
