@@ -1,0 +1,83 @@
+name: Vyce.cloud Auto Renew
+
+on:
+  schedule:
+    # 每 4 小时调度执行一次，及时捕获 24h 冷却期结束的可续期窗口
+    - cron: '0 */4 * * *'
+  workflow_dispatch: # 支持 GitHub 控制台手动一键触发
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # 跨 Run 缓存续期状态 (renew_state.json)，避免冷却期重复消耗 API
+    - name: Restore renew-state cache
+      uses: actions/cache/restore@v4
+      with:
+        path: renew_state.json
+        key: vyce-state-${{ github.run_id }}
+        restore-keys: |
+          vyce-state-
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    # (可选) 代理环境启动 (sing-box 支持全协议)
+    - name: Start Proxy (sing-box)
+      env:
+        PROXY_URL: ${{ secrets.PROXY_URL }}
+      run: |
+        if [ -z "$PROXY_URL" ]; then
+          echo "ℹ️ 未配置 PROXY_URL，跳过代理直接外连。"
+          exit 0
+        fi
+        SINGBOX_VER="1.11.4"
+        echo "⬇️ 下载 sing-box v${SINGBOX_VER}..."
+        curl -sLo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
+        tar -xzf sing-box.tar.gz
+        mv "sing-box-${SINGBOX_VER}-linux-amd64/sing-box" ./sing-box
+        chmod +x ./sing-box
+        echo "⚙️ 生成 sing-box 配置文件..."
+        python3 proxy_handler.py
+        echo "🚀 启动 sing-box 代理..."
+        nohup ./sing-box run -c config.json > singbox.log 2>&1 &
+        sleep 4
+        if curl -s -m 10 -x http://127.0.0.1:8080 https://vyce.cloud/api/servers >/dev/null 2>&1; then
+          echo "✅ sing-box 代理连通正常！"
+        else
+          echo "⚠️ 代理测试未能通达，仍将尝试直连或降级。"
+        fi
+
+    # 核心续期运行
+    - name: Run Vyce Renew Script
+      env:
+        VYCE_COOKIE: ${{ secrets.VYCE_COOKIE }}
+        USERS_JSON: ${{ secrets.USERS_JSON }}
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        PROXY_SERVER: ${{ secrets.PROXY_URL && 'http://127.0.0.1:8080' || '' }}
+      run: python3 app.py
+
+    # 状态存盘供下次 Run 还原
+    - name: Save renew-state cache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: renew_state.json
+        key: vyce-state-${{ github.run_id }}
+
+    - name: Upload Logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: logs
+        path: |
+          *.log
+          renew_state.json
+        if-no-files-found: ignore

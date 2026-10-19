@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+config.json
+sing-box*
+renew_state.json
+.DS_Store
+.venv/
+venv/
