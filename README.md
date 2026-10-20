@@ -1,72 +1,105 @@
-# Vycebump Server Auto-Renewal Tool
+<!-- markdownlint-disable-file MD033 -->
+# Vycebump — Vyce.cloud 免费 VPS 自动续期保活
 
-[![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-Auto_Renew-blue.svg)](https://github.com/dengyie/vycebump)
-[![Python](https://img.shields.io/badge/Python-3.8+-green.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
+<p align="center">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
+  <img alt="Zero Dependencies" src="https://img.shields.io/badge/dependencies-0-brightgreen.svg">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-43%20passing-brightgreen.svg">
+  <img alt="GitHub Actions" src="https://img.shields.io/badge/GitHub%20Actions-ready-2088FF?logo=githubactions&logoColor=white">
+</p>
+
+<p align="center">
+  <b>把「每 24 小时手动点一次续期」这件事彻底交给机器。</b><br>
+  自动推算 24h 冷却窗口，进入可续期区间后调用官方接口续期，Telegram 实时播报剩余存活时间。<br>
+  零第三方依赖，可跑在 GitHub Actions（完全免费）或本机 Chrome（免手抄 Cookie）。
+</p>
+
+<p align="center">
+  <a href="#为什么需要自动续期">为什么需要</a> •
+  <a href="#核心特性">核心特性</a> •
+  <a href="#快速开始">快速开始</a> •
+  <a href="#环境变量">环境变量</a> •
+  <a href="#安全与执行策略">安全策略</a> •
+  <a href="#常见问题">常见问题</a> •
+  <a href="#致谢">致谢</a>
+</p>
+
+---
 
 专为 [Vyce.cloud](https://vyce.cloud/#/servers) 免费 VPS 设计的自动续期与保活工具，架构与理念灵感源自 [dengyie/katabump](https://github.com/dengyie/katabump)。
 
----
-
 ## 💡 为什么需要自动续期？
 
-Vyce.cloud 为免费 VPS（如 `Vps-Mini`，1 vCore / 2 GB RAM / 6 GB NVMe / 纯 IPv6）提供永久免费使用资格，但设有以下保活机制：
-1. **48 小时生命周期**：每台免费 VPS 创建或续期后，存活时间上限为 48 小时（2 天）。
-2. **24 小时冷却保护**：每 24 小时只能续期一次。存活时间大于 24 小时时，面板处于 `Cooldown`（冷却中）状态，后台接口返回 `429 renewal_cooldown`。
-3. **续期重置**：在存活时间进入最后 24 小时（或机器已停止）时点击续期，存活时间立即重新重置回 48 小时。
-4. **逾期关机与销毁**：若 48 小时内未续期，机器关机保留文件；关机超过 3 天未续期则彻底销毁释放。
+Vyce.cloud 为免费 VPS（如 `Vps-Mini`，1 vCore / 2 GB RAM / 6 GB NVMe / 纯 IPv6）提供长期免费使用资格，但附带一套保活机制：
 
-**Vycebump** 自动计算冷却倒计时，在进入 24h 续期时间窗口后自动触发官方 REST 接口，实现 365 天无感自动化续期与 Telegram 通知。
+| 机制 | 说明 |
+| :--- | :--- |
+| **48 小时生命周期** | 每台免费 VPS 创建或续期后，存活上限为 48 小时 |
+| **24 小时冷却保护** | 存活时间 > 24h 时面板显示 `Cooldown`，续期接口返回 `429 renewal_cooldown` |
+| **续期重置** | 在最后 24 小时窗口内（或机器已停止时）续期，存活时间立即重置回 48 小时 |
+| **逾期关机与销毁** | 48 小时未续期则关机（文件保留）；关机超过 3 天未续期则彻底销毁 |
 
----
+也就是说，**只要错过一次 24h 窗口，机器就进入倒计时**。Vycebump 负责推算冷却倒计时，在窗口打开时自动续期，实现无感保活。
 
 ## ✨ 核心特性
 
-- **零依赖原生 Python**：基于 Python 3 原生标准库（`urllib`、`ssl`、`json`）开发，无需 `pip install` 任何额外库，开箱即用。
-- **双模驱动执行**：
-  - **模式 A（本地 CDP 无感捕获）**：Mac / Linux 本机 Chrome 启动 `--remote-debugging-port=9222` 时，脚本自动通过 Chrome DevTools Protocol 动态抓取最新 `__Host-vyce_sid` 活跃 Cookie，免除手动复制粘贴。
-  - **模式 B（云端 GitHub Actions）**：配置 GitHub Secret 后，每 4 小时全自动定时巡检与续期。
-- **状态跨 Run 持久化**：内置状态审计与冷却倒计时推算，冷却期内快速跳过，不浪费 GitHub Actions 配额或触发 Cloudflare 频控。
-- **全协议代理支持**：内置 `proxy_handler.py`，支持 `sing-box` 托管（VLESS、VMess、Hysteria2、TUIC、SOCKS5、HTTP 等），方便网络受限环境穿透。
-- **Telegram 实时推送**：支持账户脱敏、服务器信息、剩余存活时间、下次续期窗口预警与错误推送。
+- **零依赖原生 Python** — 仅用标准库（`urllib`、`ssl`、`json`、`ipaddress`），无需 `pip install` 任何东西，开箱即用。
+- **双模驱动**：
+  - **模式 A · 本地 CDP 无感捕获** — 本机 Chrome 开启 `--remote-debugging-port=9222` 后，自动从已登录标签页提取最新 `__Host-vyce_sid`，免手动复制粘贴。
+  - **模式 B · GitHub Actions 云端调度** — 配置 Secret 后每 4 小时自动巡检续期，零成本、零维护。
+- **冷却期智能跳过** — 内置倒计时推算，冷却期内直接跳过，不浪费 Actions 配额，也不触发 Cloudflare 频控。
+- **全协议代理支持** — 内置 `proxy_handler.py`，支持 VLESS、VMess、Hysteria2、TUIC、Trojan、AnyTLS、SOCKS5、HTTP(S)，以及双跳链式代理；Actions 中自动拉起 sing-box 并做健康探测。
+- **Telegram 实时推送** — 账号脱敏、服务器状态、剩余存活时间、下次续期窗口与错误告警。
+- **43 个单元测试** — 覆盖核心算法、状态边界、CDP 与代理安全策略，CI 每次运行前自动执行。
 
----
+## 🚀 快速开始
 
-## 🚀 快速上手
+### 方式一：GitHub Actions 云端自动调度（推荐）
 
-### 方式一：GitHub Actions 云端自动调度 (推荐)
+配置一次，永久生效，不需要任何常开设备。
 
-最省心、零成本的保活方式，配置一次永久生效：
+1. **Fork 本仓库**到你的 GitHub 账号。
+   > ⚠️ **安全提示**：Fork 后**无需、也严禁**在源码里硬编码任何凭据或节点链接。所有敏感信息一律通过 Actions Secrets 注入。本项目**不读取任何明文凭据文件**，请勿把凭据以文件形式提交到公开仓库。
+2. 进入你 Fork 的仓库 **Settings → Secrets and variables → Actions**，新增以下 Repository Secret：
 
-1. **Fork 本仓库** 到你的 GitHub 个人账号下。
-   > ⚠️ **注意安全**：Fork 后**无需且严禁**在仓库源码中硬编码修改任何账户凭据或节点链接！所有敏感信息均通过 GitHub Actions Secrets 安全注入。本项目**不读取任何 `login.json` 本地明文凭据文件**，切勿将凭据以文件形式提交到公开仓库。
-2. 进入你 Fork 的仓库 **Settings** -> **Secrets and variables** -> **Actions**。
-3. 新增以下 Repository Secret：
-   - **`VYCE_COOKIE`**（必填）：填入 Vyce.cloud 的登录 Cookie，格式为 `__Host-vyce_sid=xxxx...`（在浏览器 F12 -> Application -> Cookies -> `https://vyce.cloud` 中获取，或从网络请求 Header 中复制）。
-   - **`TG_BOT_TOKEN`**（可选）：Telegram Bot Token（由 [@BotFather](https://t.me/BotFather) 获取）。
-   - **`TG_CHAT_ID`**（可选）：你的 Telegram 接收通知 Chat ID。
-   - **`PROXY_URL`**（可选）：如需通过特定代理出口外连，填入节点链接（如 `vless://...`、`hy2://...`、`socks5://...`）。注意：请仅在 Actions Secret 中配置，切勿公开。
-4. （可选多账号）：如果拥有多个 Vyce 账号，可配置 **`USERS_JSON`** Secret：
+   | Secret | 必填 | 说明 |
+   | :--- | :---: | :--- |
+   | `VYCE_COOKIE` | ✅ | Vyce.cloud 登录 Cookie，格式 `__Host-vyce_sid=xxxx...` |
+   | `TG_BOT_TOKEN` | | Telegram Bot Token（[@BotFather](https://t.me/BotFather) 获取） |
+   | `TG_CHAT_ID` | | Telegram 接收通知的 Chat ID |
+   | `PROXY_URL` | | 代理节点链接（`vless://`、`hy2://`、`socks5://` 等） |
+   | `USERS_JSON` | | 多账号配置，见下方 |
+
+   Cookie 获取方式：浏览器 F12 → Application → Cookies → `https://vyce.cloud`，复制 `__Host-vyce_sid` 的值；也可直接从请求头 `Cookie` 中复制。
+
+3. **（可选）多账号**，配置 `USERS_JSON`：
+
    ```json
    [
      {"name": "user1", "cookie": "__Host-vyce_sid=cookie1..."},
      {"name": "user2", "cookie": "__Host-vyce_sid=cookie2..."}
    ]
    ```
-5. 工作流默认每 4 小时检查一次（`0 */4 * * *`），进入你仓库的 **Actions** 页面，先点击 **Enable workflow** 启用定时调度，然后可在列表中点击 **Vyce.cloud Auto Renew** -> **Run workflow** 进行首次手动测试。
 
----
+4. 进入仓库 **Actions** 页面，点击 **Enable workflow** 启用定时调度，然后选择 **Vyce.cloud Auto Renew → Run workflow** 做一次手动验证。
 
-### 方式二：本地运行 (搭配 Chrome 9222 端口)
+工作流默认每 4 小时运行一次（`0 */4 * * *`），并支持手动指定 `force` 强制续期（忽略冷却保护，用于调试）。
 
-若你在本地桌面 Chrome 中已登录 `https://vyce.cloud/#/servers`，且 Chrome 开启了远程调试端口（需要本地具备 `node` 执行环境供 CDP WebSocket 提取通信）：
+### 方式二：本地运行（搭配 Chrome 9222 端口）
+
+本机 Chrome 已登录 `https://vyce.cloud/#/servers` 且开启远程调试端口（需本机具备 `node` 供 CDP WebSocket 提取 Cookie）时：
 
 ```bash
-# 1. 运行续期脚本 (自动检测 9222 端口并提取活跃 Cookie)
+# macOS 示例：启动带调试端口的 Chrome
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 &
+
+# 运行续期脚本（自动探测 9222 端口并提取活跃 Cookie）
 python3 app.py
 ```
 
 终端输出示例：
+
 ```text
 [2026-10-19 12:15:11] vycebump 保活脚本启动
 🔍 尝试从本地 Chrome 9222 CDP 探测活跃登录态...
@@ -86,41 +119,82 @@ python3 app.py
 ✅ 任务处理完毕，状态已保存至 renew_state.json。
 ```
 
----
-
-## 🛠️ 环境变量对照表
+## ⚙️ 环境变量
 
 | 变量名 | 说明 | 示例 | 默认值 |
 | :--- | :--- | :--- | :--- |
 | `VYCE_COOKIE` | 单账号登录 Cookie | `__Host-vyce_sid=ICYUl...` | 空 |
+| `VYCE_USER` | 单账号显示名（日志脱敏用） | `myname` | `VyceUser` |
 | `USERS_JSON` | 多账号 JSON 数组 | `[{"name":"..","cookie":".."}]` | 空 |
-| `CDP_URL` | 本地 Chrome 调试端口 | `http://127.0.0.1:9222` | `http://127.0.0.1:9222` |
-| `FORCE_RENEW` | 强制发起续期请求 (无视冷却) | `true` / `false` | `false` |
-| `TG_BOT_TOKEN` | Telegram 通知 Bot Token | `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11` | 空 |
-| `TG_CHAT_ID` | Telegram 接收通知的 Chat ID | `987654321` | 空 |
-| `PROXY_SERVER` | HTTP/SOCKS 代理服务器 | `http://127.0.0.1:8080` | 空 |
-| `PROXY_URL` | 全协议节点订阅/分享链接 (Actions sing-box) | `hy2://pwd@host:port?sni=...` | 空 |
+| `CDP_URL` | 本地 Chrome 调试地址（仅允许回环） | `http://127.0.0.1:9222` | `http://127.0.0.1:9222` |
+| `FORCE_RENEW` | 强制续期，无视冷却保护 | `true` / `false` | `false` |
+| `STATE_FILE` | 状态与冷却倒计时缓存路径 | `./renew_state.json` | `./renew_state.json` |
+| `TG_BOT_TOKEN` | Telegram Bot Token | `123456:ABC-DEF...` | 空 |
+| `TG_CHAT_ID` | Telegram 接收通知 Chat ID | `987654321` | 空 |
+| `PROXY_SERVER` | HTTP/SOCKS 代理地址 | `http://127.0.0.1:8080` | 空 |
+| `PROXY_URL` | 全协议节点分享链接（Actions 拉起 sing-box） | `hy2://pwd@host:port?sni=...` | 空 |
+| `PROXY_CHAIN_URL` | 二级链式代理节点 | `socks5://127.0.0.1:1080` | 空 |
+| `ALLOW_INSECURE_PROXY` | 允许 `insecure=1` 的节点（跳过证书校验） | `1` / `true` | 关闭 |
 
----
+> 冷却期内的 `429 renewal_cooldown` 属于**预期状态**：脚本记录下次可续期窗口、正常退出（状态码 0），不会告警。
 
-## 🛡️ 安全规范与执行策略
+## 🛡️ 安全与执行策略
 
-1. **零源码硬编码凭据 (Fork 友好)**：
-   - 任何人 Fork 本项目后，**无需修改源码中的任何配置**。
-   - 凭据、代理链接及 Telegram 配置均通过 GitHub Actions Secrets 管理。
-   - 本项目**严禁且不支持 `login.json` 等明文凭据文件**，杜绝凭据落盘误提交至公开代码仓库的风险。
-2. **HTTP 429 冷却契约**：
-   - Vyce 平台规定机器在存活时间大于 24 小时时处于不可续期的冷却保护期（Cooldown），调用续期返回 `HTTP 429 {"error":"renewal_cooldown"}`。
-   - **预期冷却（`renewal_cooldown`）**：被判定为正常健康状态，记录下一次可续期窗口，不触发错误告警，工作流正常以状态码 0 退出。
-   - **非预期 429 或其他错误**：例如频繁调用被限流、网络阻断、Cookie 失效等，将触发 Telegram 报警，并以非零退出码（`exit 1`）使 CI 亮红以提醒排查。
-3. **CDP 本地边界**：
-   - 限制仅允许连接 `127.0.0.1` 或 `::1` 本地回环地址，严禁指向远程调试端口；
-   - 仅对标签页 URL 精确为 `https://vyce.cloud` 的页面提取 Cookie，杜绝恶意重定向或第三方页面抓取。
-4. **代理 Fail-Closed 保障**：
-   - 在 GitHub Actions 中配置了 `PROXY_URL` 时，启动 sing-box 后会进行健康度探测。若代理节点异常或连通失败，工作流将立即**中断失败**，坚决不降级为直连，避免意外暴露云端真实出口 IP。
+1. **零源码硬编码凭据（Fork 友好）** — 任何人 Fork 后无需修改源码，凭据、代理链接与 Telegram 配置全部走 Actions Secrets。项目**不支持也不读取 `login.json` 等明文凭据文件**，从根上避免凭据落盘被误提交。
+2. **HTTP 429 冷却契约** — 存活时间 > 24h 时平台返回 `429 {"error":"renewal_cooldown"}`：
+   - **预期冷却**：判定为健康状态，记录下次续期窗口，不告警，工作流以状态码 0 正常退出；
+   - **非预期 429 或其它错误**（限流、网络阻断、Cookie 失效等）：触发 Telegram 告警，并以非零退出码让 CI 亮红提醒排查。
+3. **CDP 本地边界** — 只允许连接 `127.0.0.1` / `::1` 回环地址，拒绝带凭据或非回环的调试端点；仅从 URL 精确为 `https://vyce.cloud` 的标签页提取 Cookie，并校验 WebSocket 目标与端口一致，杜绝恶意重定向与第三方页面抓取。
+4. **代理 Fail-Closed** — Actions 中配置 `PROXY_URL` 后会拉起 sing-box 并做连通性探测；节点异常则**立即失败退出**，绝不静默降级为直连，避免真实出口 IP 泄露。sing-box 二进制下载带 SHA256 校验。
+5. **状态缓存边界** — `renew_state.json` 仅用于本地减少无意义请求（已加入 `.gitignore`，不会入库）；Actions 每次都是干净环境，以服务端返回的冷却状态为准。
 
----
+## ❓ 常见问题
+
+**Q：会不会被判定为异常流量 / 封号？**
+A：脚本只在官方续期窗口内发起一次标准 REST 请求，冷却期内直接跳过，请求频率远低于人工操作，且不复用浏览器指纹、不模拟点击。
+
+**Q：Cookie 会过期吗？**
+A：会。Vyce 的会话 Cookie 有有效期，失效后续期会返回鉴权错误并触发 Telegram 告警，此时重新获取 `__Host-vyce_sid` 更新 Secret 即可。本地 CDP 模式则无需关心，每次运行都会自动抓取最新 Cookie。
+
+**Q：Actions 免费额度够用吗？**
+A：公开仓库的 Actions 完全免费；私有仓库每月 2000 分钟额度，本工作流单次运行通常不到 1 分钟、每天 6 次，开销可忽略。
+
+**Q：支持多账号吗？**
+A：支持，通过 `USERS_JSON` 配置，脚本会逐个账号串行处理并分别推送通知。
+
+**Q：机器已经被关机/销毁了还能救回来吗？**
+A：关机状态（48h 内未续期）仍可通过续期重置存活时间；**关机超过 3 天被彻底销毁**后无法恢复，只能重新创建。
+
+**Q：需要 `pip install` 吗？**
+A：不需要。项目零第三方依赖，仅本地 CDP 模式额外需要系统里有 `node`。
+
+## 🧪 开发与测试
+
+```bash
+# 运行全部单元测试（43 个，无需额外依赖）
+python3 -m unittest discover -s tests -v
+```
+
+仓库结构：
+
+```text
+vycebump/
+├── app.py              # 主程序：CDP 取 Cookie、续期、状态与通知
+├── proxy_handler.py    # 代理分享链接 → sing-box 配置生成
+├── tests/              # 单元测试：核心算法 / CDP 安全 / 代理安全 / 工作流策略
+└── .github/workflows/  # Actions 定时续期工作流
+```
+
+## 🌟 致谢
+
+[![LINUX DO](https://img.shields.io/badge/Community-LINUX%20DO-2563eb.svg?logo=linux&logoColor=white)](https://linux.do/)
+
+> 🐧 **本项目致谢 [LINUX DO](https://linux.do/) 社区。** 从架构选型、保活思路到代理与排障经验，都受益于社区佬友们的无私分享与深入讨论。致敬开源精神与纯粹的技术探索！
 
 ## 📄 许可证
 
-本项目依据 MIT License 开源。仅供个人自动化管理与技术交流学习使用。
+本项目依据 [MIT License](LICENSE) 开源，仅供个人自动化管理与技术交流学习使用。
+
+---
+
+如果这个项目帮你省下了每天手动续期的时间，欢迎点个 **Star** ⭐ 支持一下。
