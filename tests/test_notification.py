@@ -48,11 +48,19 @@ class TestBuildNotification(unittest.TestCase):
 
 
 class TestNotificationDispatch(unittest.TestCase):
-    def test_dispatch_fans_out_to_both_channels(self):
-        with patch("app.send_tg_message") as mock_tg, patch("app.send_email_message") as mock_email:
+    def test_dispatch_fans_out_to_all_channels(self):
+        with patch("app.send_tg_message") as mock_tg, \
+                patch("app.send_email_message") as mock_email, \
+                patch("app.send_onemail_message") as mock_onemail:
             app.send_notification("🎉", "续期成功", "user", details={"server_name": "vps-mini"}, proxy="http://127.0.0.1:8080")
-        mock_tg.assert_called_once_with("🎉", "续期成功", "user", {"server_name": "vps-mini"}, "", "http://127.0.0.1:8080")
-        mock_email.assert_called_once_with("🎉", "续期成功", "user", {"server_name": "vps-mini"}, "", "http://127.0.0.1:8080")
+        expected = ("🎉", "续期成功", "user", {"server_name": "vps-mini"}, "", "http://127.0.0.1:8080")
+        mock_tg.assert_called_once_with(*expected)
+        mock_email.assert_called_once_with(*expected)
+        mock_onemail.assert_called_once_with(*expected)
+
+    def test_build_notification_subject_shared(self):
+        content = app.build_notification("🎉", "续期成功", "someone@example.com")
+        self.assertEqual(content["subject"], "[Vycebump] 🎉 续期成功 - so****ne@example.com")
 
     def test_process_account_uses_unified_entrypoint(self):
         # 保证未来的续期分支不会被改回单渠道调用
@@ -183,14 +191,30 @@ class TestEmailChannel(unittest.TestCase):
 
 
 def reload_app_config():
-    """重新读取模块级 SMTP/EMAIL 配置常量 (与 app.py 保持一致的解析逻辑)。"""
+    """重新读取模块级 SMTP/EMAIL 配置常量，复用 app 的解析函数（单一事实来源）。"""
     app.SMTP_HOST = os.environ.get("SMTP_HOST") or ""
-    app.SMTP_PORT = int(os.environ.get("SMTP_PORT") or "0") or 0
+    app.SMTP_PORT = app._parse_smtp_port(os.environ.get("SMTP_PORT"))
     app.SMTP_USERNAME = os.environ.get("SMTP_USERNAME") or ""
     app.SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") or ""
     app.EMAIL_FROM = os.environ.get("EMAIL_FROM") or ""
-    app.EMAIL_TO = [addr.strip() for addr in os.environ.get("EMAIL_TO", "").split(",") if addr.strip()]
+    app.EMAIL_TO = app._parse_email_list(os.environ.get("EMAIL_TO"))
     app.EMAIL_SUBJECT_PREFIX = os.environ.get("EMAIL_SUBJECT_PREFIX") or "[Vycebump]"
+
+
+class TestConfigParsing(unittest.TestCase):
+    """配置解析健壮性: 非法值不得中断模块加载（P1 回归护栏）"""
+
+    def test_invalid_smtp_port_falls_back_to_default(self):
+        self.addCleanup(restore_env, "SMTP_PORT", os.environ.get("SMTP_PORT"))
+        # 非法值回退 0 且不抛异常（模块导入路径不得因可选配置崩溃）
+        os.environ["SMTP_PORT"] = "465/587（SSL）"
+        reload_app_config()
+        self.assertEqual(app.SMTP_PORT, 0)
+        # 合法值正常解析；模块级常量与解析函数结果一致
+        os.environ["SMTP_PORT"] = "465"
+        reload_app_config()
+        self.assertEqual(app.SMTP_PORT, 465)
+        self.assertEqual(app._parse_smtp_port("465"), app.SMTP_PORT)
 
 
 def restore_env(name, value):
@@ -204,7 +228,7 @@ class TestOneMailChannel(unittest.TestCase):
     """One-Mail HTTP 发信渠道 (ONEMAIL_* 环境变量)"""
 
     def setUp(self):
-        for name in ("ONEMAIL_BASE_URL", "ONEMAIL_MODE", "ONEMAIL_CREDENTIAL", "ONEMAIL_FROM_NAME", "ONEMAIL_FROM", "EMAIL_FROM", "EMAIL_TO"):
+        for name in ("ONEMAIL_BASE_URL", "ONEMAIL_MODE", "ONEMAIL_CREDENTIAL", "ONEMAIL_FROM_NAME", "EMAIL_FROM", "EMAIL_TO"):
             self.addCleanup(restore_env, name, os.environ.get(name))
             os.environ.pop(name, None)
         reload_onemail_config()
@@ -280,6 +304,32 @@ class TestOneMailChannel(unittest.TestCase):
         with patch("app.http_request", return_value=(403, {}, "forbidden")):
             app.send_onemail_message("🎉", "续期成功", "user")  # 只打警告，不抛异常
 
+    def test_multi_recipient_sends_each_address(self):
+        os.environ.update({
+            "ONEMAIL_BASE_URL": "https://mail.example.com",
+            "ONEMAIL_CREDENTIAL": "jwt",
+            "EMAIL_TO": "a@example.com, b@example.com",
+        })
+        reload_onemail_config()
+        with patch("app.http_request", return_value=(200, {}, '{"status":"ok"}')) as mock_req:
+            app.send_onemail_message("🎉", "续期成功", "user")
+        self.assertEqual(mock_req.call_count, 2)
+        tos = [json.loads(call.kwargs["data"])["to_mail"] for call in mock_req.call_args_list]
+        self.assertEqual(tos, ["a@example.com", "b@example.com"])
+
+    def test_subject_not_leaked_when_admin_mode_missing_from(self):
+        # admin 模式缺 EMAIL_FROM 时跳过且不发任何请求
+        os.environ.update({
+            "ONEMAIL_BASE_URL": "https://mail.example.com",
+            "ONEMAIL_MODE": "admin",
+            "ONEMAIL_CREDENTIAL": "admin-password",
+            "EMAIL_TO": "me@example.com",
+        })
+        reload_onemail_config()
+        with patch("app.http_request", return_value=(200, {}, "{}")) as mock_req:
+            app.send_onemail_message("🎉", "续期成功", "user")
+        mock_req.assert_not_called()
+
 
 def reload_onemail_config():
     """重新读取模块级 One-Mail 配置常量 (含发信所需共享字段 EMAIL_TO/EMAIL_FROM)。"""
@@ -288,7 +338,7 @@ def reload_onemail_config():
     app.ONEMAIL_CREDENTIAL = os.environ.get("ONEMAIL_CREDENTIAL") or ""
     app.ONEMAIL_FROM_NAME = os.environ.get("ONEMAIL_FROM_NAME") or "Vycebump"
     app.EMAIL_FROM = os.environ.get("EMAIL_FROM") or ""
-    app.EMAIL_TO = [addr.strip() for addr in os.environ.get("EMAIL_TO", "").split(",") if addr.strip()]
+    app.EMAIL_TO = app._parse_email_list(os.environ.get("EMAIL_TO"))
 
 
 if __name__ == "__main__":

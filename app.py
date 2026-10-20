@@ -36,14 +36,29 @@ from typing import Dict, List, Optional, Tuple
 BASE_URL = "https://vyce.cloud"
 API_BASE = f"{BASE_URL}/api"
 
+
+def _parse_smtp_port(raw: Optional[str]) -> int:
+    """解析 SMTP 端口；非法值回退为 0（运行时取默认端口），绝不阻断模块加载。"""
+    try:
+        return int(raw or "0") or 0
+    except ValueError:
+        shown = str(raw)[:40]
+        print(f"⚠️ SMTP_PORT={shown} 不是合法端口号，已忽略并使用默认端口。")
+        return 0
+
+
+def _parse_email_list(raw: Optional[str]) -> List[str]:
+    """解析逗号分隔的收件邮箱列表，过滤空白项。"""
+    return [addr.strip() for addr in (raw or "").split(",") if addr.strip()]
+
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""
 SMTP_HOST = os.environ.get("SMTP_HOST") or ""
-SMTP_PORT = int(os.environ.get("SMTP_PORT") or "0") or 0
+SMTP_PORT = _parse_smtp_port(os.environ.get("SMTP_PORT"))
 SMTP_USERNAME = os.environ.get("SMTP_USERNAME") or ""
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") or ""
 EMAIL_FROM = os.environ.get("EMAIL_FROM") or ""
-EMAIL_TO = [addr.strip() for addr in os.environ.get("EMAIL_TO", "").split(",") if addr.strip()]
+EMAIL_TO = _parse_email_list(os.environ.get("EMAIL_TO"))
 EMAIL_SUBJECT_PREFIX = os.environ.get("EMAIL_SUBJECT_PREFIX") or "[Vycebump]"
 # One-Mail (https://github.com/dengyie/one-mail) HTTP 发信渠道：
 #   ONEMAIL_MODE=user      → POST {BASE}/api/send_mail，Bearer <地址 JWT>，发件人=该地址
@@ -240,7 +255,8 @@ def build_notification(
     plain_lines.append(f"⏱️ 报告时间: {beijing_time} (UTC+8)")
     html_lines.append(f"⏱️ 报告时间: {beijing_time} (UTC+8)")
 
-    return {"plain": "\n".join(plain_lines), "html": "\n".join(html_lines)}
+    subject = f"{EMAIL_SUBJECT_PREFIX} {status_icon} {status_title} - {mask_username(account_name)}"
+    return {"plain": "\n".join(plain_lines), "html": "\n".join(html_lines), "subject": subject}
 
 
 def send_notification(
@@ -302,10 +318,9 @@ def send_email_message(
         return
 
     content = build_notification(status_icon, status_title, account_name, details, error_msg)
-    subject = f"{EMAIL_SUBJECT_PREFIX} {status_icon} {status_title} - {mask_username(account_name)}"
 
     message = email.message.EmailMessage()
-    message["Subject"] = subject
+    message["Subject"] = content["subject"]
     message["From"] = EMAIL_FROM or SMTP_USERNAME
     message["To"] = ", ".join(EMAIL_TO)
     message.set_content(content["plain"])
@@ -347,54 +362,45 @@ def send_onemail_message(
     ONEMAIL_MODE=user  (默认): Bearer <地址 JWT> 调 POST /api/send_mail，
         发件人即该 JWT 对应地址，要求账户 send_balance > 0。
     ONEMAIL_MODE=admin: x-admin-auth <管理密码> 调 POST /admin/send_mail，
-        需同时在 EMAIL_FROM (或 ONEMAIL_FROM) 指定发件地址。
+        需同时以 EMAIL_FROM 指定发件地址。
     One-Mail 侧需已配置发信通道 (Resend / SMTP / SEND_MAIL binding)。
     """
     if not (ONEMAIL_BASE_URL and ONEMAIL_CREDENTIAL and EMAIL_TO):
         return
-    from_addr = EMAIL_FROM or os.environ.get("ONEMAIL_FROM") or ""
 
     content = build_notification(status_icon, status_title, account_name, details, error_msg)
-    subject = f"{EMAIL_SUBJECT_PREFIX} {status_icon} {status_title} - {mask_username(account_name)}"
 
     if ONEMAIL_MODE == "admin":
-        if not from_addr:
-            print("⚠️ One-Mail admin 模式需要 EMAIL_FROM (或 ONEMAIL_FROM) 指定发件地址，跳过邮件通知。")
+        if not EMAIL_FROM:
+            print("⚠️ One-Mail admin 模式需要 EMAIL_FROM 指定发件地址，跳过邮件通知。")
             return
         url = f"{ONEMAIL_BASE_URL}/admin/send_mail"
         headers = {"x-admin-auth": ONEMAIL_CREDENTIAL, "Content-Type": "application/json"}
-        body = {
-            "from_mail": from_addr,
-            "from_name": ONEMAIL_FROM_NAME,
-            "to_mail": EMAIL_TO[0],
-            "to_name": "",
-            "subject": subject,
-            "content": content["html"],
-            "is_html": True,
-        }
+        base_body = {"from_mail": EMAIL_FROM, "from_name": ONEMAIL_FROM_NAME}
     else:
         url = f"{ONEMAIL_BASE_URL}/api/send_mail"
         headers = {
             "Authorization": f"Bearer {ONEMAIL_CREDENTIAL}",
             "Content-Type": "application/json",
         }
-        body = {
-            "from_name": ONEMAIL_FROM_NAME,
-            "to_mail": EMAIL_TO[0],
-            "to_name": "",
-            "subject": subject,
-            "content": content["html"],
-            "is_html": True,
-        }
+        base_body = {"from_name": ONEMAIL_FROM_NAME}
 
-    status, _, res = http_request(
-        url, method="POST", headers=headers,
-        data=json.dumps(body).encode("utf-8"), proxy=proxy, timeout=20,
-    )
-    if status == 200:
-        print(f"📩 One-Mail 通知发送成功 -> {', '.join(EMAIL_TO)}")
-    else:
-        print(f"⚠️ One-Mail 发送失败 ({status}): {safe_error_text(_error_message(res, 'request failed'))}")
+    # One-Mail 的 to_mail 为单值，多收件人逐个发送
+    sent_to, failed_to = [], []
+    for to_mail in EMAIL_TO:
+        body = {**base_body, "to_mail": to_mail, "to_name": "", "subject": content["subject"],
+                "content": content["html"], "is_html": True}
+        status, _, res = http_request(
+            url, method="POST", headers=headers,
+            data=json.dumps(body).encode("utf-8"), proxy=proxy, timeout=20,
+        )
+        if status == 200:
+            sent_to.append(to_mail)
+        else:
+            failed_to.append(to_mail)
+            print(f"⚠️ One-Mail 发送失败 ({status}) -> {to_mail}: {safe_error_text(_error_message(res, 'request failed'))}")
+    if sent_to:
+        print(f"📩 One-Mail 通知发送成功 -> {', '.join(sent_to)}")
 
 
 # ============================================================

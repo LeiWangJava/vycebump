@@ -55,7 +55,7 @@ Vyce.cloud 为免费 VPS（如 `Vps-Mini`，1 vCore / 2 GB RAM / 6 GB NVMe / 纯
 - **冷却期智能跳过** — 内置倒计时推算，冷却期内直接跳过续期请求，减少无效调用与被平台频控的风险。
 - **全协议代理支持** — 内置 `proxy_handler.py`，支持 VLESS、VMess、Hysteria2、TUIC、Trojan、AnyTLS、SOCKS5、HTTP(S)，以及双跳链式代理；Actions 中自动拉起 sing-box 并做健康探测。
 - **双渠道实时推送** — Telegram 与邮件（SMTP）通知，账号脱敏、服务器状态、剩余存活时间、下次续期窗口与错误告警；两类渠道各自独立配置，配了哪个发哪个，可同时启用。邮件仅用标准库 `smtplib` 实现，保持零依赖。
-- **43 个单元测试** — 覆盖核心算法、状态边界、CDP 与代理安全策略，CI 每次运行前自动执行。
+- **64 个单元测试** — 覆盖核心算法、状态边界、CDP 与代理安全策略、三渠道通知，CI 每次运行前自动执行。
 
 ## 快速开始
 
@@ -170,7 +170,7 @@ python3 app.py
    - **预期冷却**：判定为健康状态，记录下次续期窗口，不告警，工作流以状态码 0 正常退出；
    - **非预期 429 或其它错误**（限流、网络阻断、Cookie 失效等）：触发 Telegram 告警，并以非零退出码让 CI 亮红提醒排查。
 3. **CDP 本地边界** — 只允许连接 `127.0.0.1` / `::1` 回环地址，拒绝带凭据或非回环的调试端点；仅从 URL 精确为 `https://vyce.cloud` 的标签页提取 Cookie，并校验 WebSocket 目标与端口一致，杜绝恶意重定向与第三方页面抓取。
-4. **代理 Fail-Closed** — Actions 中配置 `PROXY_URL` 后会拉起 sing-box 并做连通性探测；节点异常则**立即失败退出**，绝不静默降级为直连，避免真实出口 IP 泄露。sing-box 二进制下载带 SHA256 校验。
+4. **代理 Fail-Closed** — Actions 中配置 `PROXY_URL` 后会拉起 sing-box 并做连通性探测；节点异常则**立即失败退出**，绝不静默降级为直连，避免真实出口 IP 泄露。sing-box 二进制下载带 SHA256 校验。该策略覆盖全部 HTTP(S) 流量（Vyce API、Telegram、One-Mail）；**SMTP 邮件通道为直连**，不经过代理（标准库 `smtplib` 不支持代理隧道），如需出口隔离请改用 One-Mail 渠道或代理型 SMTP。
 5. **状态缓存边界** — `renew_state.json` 仅用于本地减少无意义请求（已加入 `.gitignore`，不会入库）；Actions 每次都是干净环境，以服务端返回的冷却状态为准。
 
 ## 常见问题
@@ -205,7 +205,7 @@ A：账号来源有优先级：只要 `USERS_JSON` 或 `VYCE_COOKIE` 能解析�
 ## 开发与测试
 
 ```bash
-# 运行全部单元测试（43 个，无需额外依赖）
+# 运行全部单元测试（64 个，无需额外依赖）
 python3 -m unittest discover -s tests -v
 ```
 
