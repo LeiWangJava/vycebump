@@ -169,7 +169,9 @@ def http_request(
 
     opener = urllib.request.build_opener(*handlers)
     req = urllib.request.Request(url, data=data, method=method)
-
+    # urllib 默认 UA (Python-urllib/x) 会被 Cloudflare Bot Fight Mode 以 1010 直接 403，
+    # 必须携带自定义 UA；headers 显式传入的 User-Agent 优先。
+    req.add_unredirected_header("User-Agent", "Vycebump/1.0 (+https://github.com/dengyie/vycebump)")
     if headers:
         for k, v in headers.items():
             req.add_header(k, v)
