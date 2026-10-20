@@ -48,7 +48,7 @@ Vyce.cloud 为免费 VPS（如 `Vps-Mini`，1 vCore / 2 GB RAM / 6 GB NVMe / 纯
 - **双模驱动**：
   - **模式 A · 本地 CDP 无感捕获** — 本机 Chrome 开启 `--remote-debugging-port=9222` 后，自动从已登录标签页提取最新 `__Host-vyce_sid`，免手动复制粘贴。
   - **模式 B · GitHub Actions 云端调度** — 配置 Secret 后每 4 小时自动巡检续期，零成本、零维护。
-- **冷却期智能跳过** — 内置倒计时推算，冷却期内直接跳过，不浪费 Actions 配额，也不触发 Cloudflare 频控。
+- **冷却期智能跳过** — 内置倒计时推算，冷却期内直接跳过续期请求，减少无效调用与被平台频控的风险。
 - **全协议代理支持** — 内置 `proxy_handler.py`，支持 VLESS、VMess、Hysteria2、TUIC、Trojan、AnyTLS、SOCKS5、HTTP(S)，以及双跳链式代理；Actions 中自动拉起 sing-box 并做健康探测。
 - **Telegram 实时推送** — 账号脱敏、服务器状态、剩余存活时间、下次续期窗口与错误告警。
 - **43 个单元测试** — 覆盖核心算法、状态边界、CDP 与代理安全策略，CI 每次运行前自动执行。
@@ -133,8 +133,8 @@ python3 app.py
 | `TG_CHAT_ID` | Telegram 接收通知 Chat ID | `987654321` | 空 |
 | `PROXY_SERVER` | HTTP/SOCKS 代理地址（未设置时自动读取 `https_proxy` / `http_proxy`） | `http://127.0.0.1:8080` | 空 |
 | `PROXY_URL` | 全协议节点分享链接（Actions 中拉起 sing-box 并健康探测） | `hy2://pwd@host:port?sni=...` | 空 |
-| `PROXY_CHAIN_URL` | 二级链式代理节点，与 `PROXY_URL` 组成双跳（本地生成配置时生效） | `socks5://127.0.0.1:1080` | 空 |
-| `ALLOW_INSECURE_PROXY` | 允许节点携带 `insecure=1`（跳过 TLS 证书校验，默认拒绝） | `1` / `true` | 关闭 |
+| `PROXY_CHAIN_URL` | 二级链式代理节点，与 `PROXY_URL` 组成双跳（代码支持，默认工作流未注入，需自行加 env） | `socks5://127.0.0.1:1080` | 空 |
+| `ALLOW_INSECURE_PROXY` | 允许节点携带 `insecure=1`（跳过 TLS 证书校验；默认工作流未注入，需自行加 env） | `1` / `true` | 关闭 |
 
 > 冷却期内的 `429 renewal_cooldown` 属于**预期状态**：脚本记录下次可续期窗口、正常退出（状态码 0），不会告警。
 
@@ -170,6 +170,9 @@ A：关机状态（48h 内未续期）仍可通过续期重置存活时间；**�
 
 **Q：需要 `pip install` 吗？**
 A：不需要。项目零第三方依赖，仅本地 CDP 模式额外需要系统里有 `node`。
+
+**Q：本地同时设置了 `VYCE_COOKIE`，为什么没走 CDP 自动抓取？**
+A：账号来源有优先级：只要 `USERS_JSON` 或 `VYCE_COOKIE` 能解析出账号，脚本就不会再去连 Chrome；只有两者都为空时才启用 CDP 探测。想让本地运行始终使用浏览器里的最新会话，就不要设置这两个变量。
 
 ## 开发与测试
 
