@@ -5,7 +5,7 @@
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white">
   <img alt="Zero Dependencies" src="https://img.shields.io/badge/dependencies-0-brightgreen.svg">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-43%20passing-brightgreen.svg">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-passing-brightgreen.svg">
   <img alt="GitHub Actions" src="https://img.shields.io/badge/GitHub%20Actions-ready-2088FF?logo=githubactions&logoColor=white">
 </p>
 
@@ -13,6 +13,10 @@
   <b>把「每 24 小时手动点一次续期」这件事彻底交给机器。</b><br>
   自动推算 24h 冷却窗口，进入可续期区间后调用官方接口续期，Telegram 实时播报剩余存活时间。<br>
   零第三方依赖，可跑在 GitHub Actions（完全免费）或本机 Chrome（免手抄 Cookie）。
+</p>
+
+<p align="center">
+  <img src="assets/demo.svg" alt="Vycebump 本地运行输出示例" width="820">
 </p>
 
 <p align="center">

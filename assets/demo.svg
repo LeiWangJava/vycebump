@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="452" viewBox="0 0 900 452" role="img" aria-label="Vycebump 运行输出示例">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#0b0f14"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="899" height="451" rx="12" fill="url(#bg)" stroke="#30363d"/>
+
+  <!-- title bar -->
+  <path d="M0.5 12.5 A12 12 0 0 1 12.5 0.5 L887.5 0.5 A12 12 0 0 1 899.5 12.5 L899.5 40 L0.5 40 Z" fill="#161b22"/>
+  <circle cx="26" cy="20.5" r="6" fill="#ff5f57"/>
+  <circle cx="46" cy="20.5" r="6" fill="#febc2e"/>
+  <circle cx="66" cy="20.5" r="6" fill="#28c840"/>
+  <text x="450" y="25" text-anchor="middle" font-family="SFMono-Regular, Consolas, Menlo, monospace" font-size="12" fill="#8b949e">python3 app.py — vycebump</text>
+  <line x1="0.5" y1="40" x2="899.5" y2="40" stroke="#30363d"/>
+
+  <g font-family="SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace" font-size="13.5" fill="#c9d1d9">
+    <text x="28" y="70">[2026-10-19 12:15:11] vycebump 保活脚本启动</text>
+    <text x="28" y="96">🔍 尝试从本地 Chrome 9222 CDP 探测活跃登录态...</text>
+    <text x="28" y="122" fill="#3fb950">✅ 成功从本地 Chrome 提取到最新 Session Cookie！</text>
+
+    <text x="28" y="152" fill="#8b949e">==================================================</text>
+    <text x="28" y="178" fill="#58a6ff">🔑 正在处理账户: ex****le</text>
+    <text x="28" y="204" fill="#8b949e">==================================================</text>
+    <text x="28" y="230" fill="#3fb950">✅ 登录成功！用户: example_user</text>
+
+    <text x="28" y="260">🖥️ 检查服务器: vps-mini</text>
+    <text x="28" y="286">   类型: free (mini) | 状态: running</text>
+    <text x="28" y="312">   ⏳ 剩余存活时间: 1d 12h (到期: 2026-10-21 00:27:23)</text>
+    <text x="28" y="338" fill="#d29922">   ❄️ 当前处于冷却期中 (Cooldown)，无需续期。</text>
+    <text x="28" y="364">   ⏰ 预计下次可续期时间: 2026-10-20 00:27:23 (约 12h 12m 后)</text>
+
+    <text x="28" y="394" fill="#3fb950">✅ 任务处理完毕，状态已保存至 renew_state.json。</text>
+    <text x="28" y="424" fill="#8b949e">$ _</text>
+  </g>
+</svg>
