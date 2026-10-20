@@ -45,6 +45,13 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") or ""
 EMAIL_FROM = os.environ.get("EMAIL_FROM") or ""
 EMAIL_TO = [addr.strip() for addr in os.environ.get("EMAIL_TO", "").split(",") if addr.strip()]
 EMAIL_SUBJECT_PREFIX = os.environ.get("EMAIL_SUBJECT_PREFIX") or "[Vycebump]"
+# One-Mail (https://github.com/dengyie/one-mail) HTTP 发信渠道：
+#   ONEMAIL_MODE=user      → POST {BASE}/api/send_mail，Bearer <地址 JWT>，发件人=该地址
+#   ONEMAIL_MODE=admin     → POST {BASE}/admin/send_mail，x-admin-auth: <管理密码>，FROM 指定发件人
+ONEMAIL_BASE_URL = (os.environ.get("ONEMAIL_BASE_URL") or "").rstrip("/")
+ONEMAIL_MODE = (os.environ.get("ONEMAIL_MODE") or "user").strip().lower()
+ONEMAIL_CREDENTIAL = os.environ.get("ONEMAIL_CREDENTIAL") or ""
+ONEMAIL_FROM_NAME = os.environ.get("ONEMAIL_FROM_NAME") or "Vycebump"
 CDP_URL = os.environ.get("CDP_URL") or "http://127.0.0.1:9222"
 FORCE_RENEW = os.environ.get("FORCE_RENEW", "").lower() in ("true", "1", "yes")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -244,9 +251,10 @@ def send_notification(
     error_msg: str = "",
     proxy: Optional[str] = None,
 ):
-    """统一通知入口：向所有已配置的渠道 (Telegram / Email) 推送同一消息。"""
+    """统一通知入口：向所有已配置的渠道 (Telegram / Email / One-Mail) 推送同一消息。"""
     send_tg_message(status_icon, status_title, account_name, details, error_msg, proxy)
     send_email_message(status_icon, status_title, account_name, details, error_msg, proxy)
+    send_onemail_message(status_icon, status_title, account_name, details, error_msg, proxy)
 
 
 def send_tg_message(
@@ -324,6 +332,69 @@ def send_email_message(
         print(f"📩 邮件通知发送成功 -> {', '.join(EMAIL_TO)}")
     except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
         print(f"⚠️ 邮件发送失败: {safe_error_text(str(exc), 200)}")
+
+
+def send_onemail_message(
+    status_icon: str,
+    status_title: str,
+    account_name: str,
+    details: Optional[Dict] = None,
+    error_msg: str = "",
+    proxy: Optional[str] = None,
+):
+    """通过自建 One-Mail 实例的 HTTP API 发送通知邮件。
+
+    ONEMAIL_MODE=user  (默认): Bearer <地址 JWT> 调 POST /api/send_mail，
+        发件人即该 JWT 对应地址，要求账户 send_balance > 0。
+    ONEMAIL_MODE=admin: x-admin-auth <管理密码> 调 POST /admin/send_mail，
+        需同时在 EMAIL_FROM (或 ONEMAIL_FROM) 指定发件地址。
+    One-Mail 侧需已配置发信通道 (Resend / SMTP / SEND_MAIL binding)。
+    """
+    if not (ONEMAIL_BASE_URL and ONEMAIL_CREDENTIAL and EMAIL_TO):
+        return
+    from_addr = EMAIL_FROM or os.environ.get("ONEMAIL_FROM") or ""
+
+    content = build_notification(status_icon, status_title, account_name, details, error_msg)
+    subject = f"{EMAIL_SUBJECT_PREFIX} {status_icon} {status_title} - {mask_username(account_name)}"
+
+    if ONEMAIL_MODE == "admin":
+        if not from_addr:
+            print("⚠️ One-Mail admin 模式需要 EMAIL_FROM (或 ONEMAIL_FROM) 指定发件地址，跳过邮件通知。")
+            return
+        url = f"{ONEMAIL_BASE_URL}/admin/send_mail"
+        headers = {"x-admin-auth": ONEMAIL_CREDENTIAL, "Content-Type": "application/json"}
+        body = {
+            "from_mail": from_addr,
+            "from_name": ONEMAIL_FROM_NAME,
+            "to_mail": EMAIL_TO[0],
+            "to_name": "",
+            "subject": subject,
+            "content": content["html"],
+            "is_html": True,
+        }
+    else:
+        url = f"{ONEMAIL_BASE_URL}/api/send_mail"
+        headers = {
+            "Authorization": f"Bearer {ONEMAIL_CREDENTIAL}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "from_name": ONEMAIL_FROM_NAME,
+            "to_mail": EMAIL_TO[0],
+            "to_name": "",
+            "subject": subject,
+            "content": content["html"],
+            "is_html": True,
+        }
+
+    status, _, res = http_request(
+        url, method="POST", headers=headers,
+        data=json.dumps(body).encode("utf-8"), proxy=proxy, timeout=20,
+    )
+    if status == 200:
+        print(f"📩 One-Mail 通知发送成功 -> {', '.join(EMAIL_TO)}")
+    else:
+        print(f"⚠️ One-Mail 发送失败 ({status}): {safe_error_text(_error_message(res, 'request failed'))}")
 
 
 # ============================================================

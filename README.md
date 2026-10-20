@@ -76,6 +76,8 @@ Vyce.cloud 为免费 VPS（如 `Vps-Mini`，1 vCore / 2 GB RAM / 6 GB NVMe / 纯
    | `SMTP_PORT` | | SMTP 端口，`465` 走隐式 TLS，默认 `587` 走 STARTTLS |
    | `SMTP_USERNAME` / `SMTP_PASSWORD` | | SMTP 登录账号与授权码（不是邮箱网页密码） |
    | `EMAIL_TO` | | 收件邮箱，支持逗号分隔多个 |
+   | `ONEMAIL_BASE_URL` | | [One-Mail](https://github.com/dengyie/one-mail) 自建实例地址（如 `https://mail.example.com`），配 `ONEMAIL_CREDENTIAL` + `EMAIL_TO` 即启用 HTTP API 发信 |
+   | `ONEMAIL_CREDENTIAL` | | `user` 模式填地址 JWT；`admin` 模式填管理密码 |
    | `PROXY_URL` | | 代理节点链接（`vless://`、`hy2://`、`socks5://` 等） |
    | `USERS_JSON` | | 多账号配置，见下方 |
 
@@ -146,6 +148,10 @@ python3 app.py
 | `EMAIL_FROM` | 发件人地址（默认取 `SMTP_USERNAME`） | `notify@mangoqwq.com` | `SMTP_USERNAME` |
 | `EMAIL_TO` | 收件邮箱，逗号分隔可发多人 | `me@example.com,alt@example.com` | 空 |
 | `EMAIL_SUBJECT_PREFIX` | 邮件主题前缀 | `[Vycebump]` | `[Vycebump]` |
+| `ONEMAIL_BASE_URL` | One-Mail 自建实例地址（HTTP API 发信，与 SMTP 渠道二选一即可） | `https://mail.example.com` | 空 |
+| `ONEMAIL_MODE` | `user`：地址 JWT 调 `/api/send_mail`；`admin`：管理密码调 `/admin/send_mail`（需配 `EMAIL_FROM` 作发件人） | `user` / `admin` | `user` |
+| `ONEMAIL_CREDENTIAL` | `user` 模式 = 地址 JWT；`admin` 模式 = 管理密码 | `eyJhbGciOi...` | 空 |
+| `ONEMAIL_FROM_NAME` | 发件人显示名 | `Vycebump` | `Vycebump` |
 | `PROXY_SERVER` | HTTP/SOCKS 代理地址（未设置时自动读取 `https_proxy` / `http_proxy`） | `http://127.0.0.1:8080` | 空 |
 | `PROXY_URL` | 全协议节点分享链接（Actions 中拉起 sing-box 并健康探测） | `hy2://pwd@host:port?sni=...` | 空 |
 | `PROXY_CHAIN_URL` | 二级链式代理节点，与 `PROXY_URL` 组成双跳（代码支持，默认工作流未注入，需自行加 env） | `socks5://127.0.0.1:1080` | 空 |
@@ -154,6 +160,8 @@ python3 app.py
 > 冷却期内的 `429 renewal_cooldown` 属于**预期状态**：脚本记录下次可续期窗口、正常退出（状态码 0），不会告警。
 
 **邮箱通知快速配置（以 QQ 邮箱为例）**：邮箱设置 → 账户 → 开启 SMTP 服务并生成授权码，然后配置 Secrets：`SMTP_HOST=smtp.qq.com`、`SMTP_PORT=465`、`SMTP_USERNAME=你的QQ邮箱`、`SMTP_PASSWORD=授权码`、`EMAIL_TO=接收邮箱`。Gmail（`smtp.gmail.com` + 应用专用密码）、Outlook、企业自建 SMTP 同理，只需换主机与端口。
+
+**或者：接自建 One-Mail 实例直接 HTTP API 发信（无需 SMTP 授权码）**：配置 `ONEMAIL_BASE_URL=https://你的实例`、`ONEMAIL_CREDENTIAL=<凭据>`、`EMAIL_TO=接收邮箱` 即可。`user` 模式填邮箱地址 JWT（发件人即该地址，要求 `send_balance > 0`）；`admin` 模式填管理密码并加配 `EMAIL_FROM` 指定发件地址。One-Mail 侧需已配置发信通道（Resend / SMTP / SEND_MAIL binding）。SMTP 与 One-Mail 两个邮箱渠道各自独立，配了哪个走哪个，都不冲突。
 
 ## 安全与执行策略
 
