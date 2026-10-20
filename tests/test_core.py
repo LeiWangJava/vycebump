@@ -71,20 +71,20 @@ class TestCooldownAndRenewalLogic(unittest.TestCase):
         self.account = {"name": "TestUser", "cookie": "__Host-vyce_sid=mock_cookie"}
         self.state = {}
 
-    @patch("app.send_tg_message")
+    @patch("app.send_notification")
     @patch("app.VyceClient")
-    def test_process_account_login_failure(self, mock_client_cls, mock_tg):
+    def test_process_account_login_failure(self, mock_client_cls, mock_notify):
         client = MagicMock()
         client.get_me.return_value = None
         mock_client_cls.return_value = client
 
         ok = process_account(self.account, self.state)
         self.assertFalse(ok)
-        mock_tg.assert_called_once()
+        mock_notify.assert_called_once()
 
-    @patch("app.send_tg_message")
+    @patch("app.send_notification")
     @patch("app.VyceClient")
-    def test_process_account_in_cooldown(self, mock_client_cls, mock_tg):
+    def test_process_account_in_cooldown(self, mock_client_cls, mock_notify):
         client = MagicMock()
         client.get_me.return_value = {"login": "testuser", "id": "u123"}
         import time
@@ -107,9 +107,9 @@ class TestCooldownAndRenewalLogic(unittest.TestCase):
         client.renew_server.assert_not_called()
         self.assertEqual(self.state["srv-1"]["status"], "cooldown")
 
-    @patch("app.send_tg_message")
+    @patch("app.send_notification")
     @patch("app.VyceClient")
-    def test_process_account_renewable_success(self, mock_client_cls, mock_tg):
+    def test_process_account_renewable_success(self, mock_client_cls, mock_notify):
         client = MagicMock()
         client.get_me.return_value = {"login": "testuser", "id": "u123"}
         import time
@@ -136,9 +136,9 @@ class TestCooldownAndRenewalLogic(unittest.TestCase):
         client.renew_server.assert_called_once_with("srv-2")
         self.assertEqual(self.state["srv-2"]["status"], "success")
 
-    @patch("app.send_tg_message")
+    @patch("app.send_notification")
     @patch("app.VyceClient")
-    def test_process_account_renewal_fatal_error(self, mock_client_cls, mock_tg):
+    def test_process_account_renewal_fatal_error(self, mock_client_cls, mock_notify):
         client = MagicMock()
         client.get_me.return_value = {"login": "testuser", "id": "u123"}
         import time

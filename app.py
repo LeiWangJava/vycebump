@@ -18,8 +18,10 @@ import sys
 import json
 import time
 import ssl
+import smtplib
 import subprocess
 import datetime
+import email.message
 import html
 import ipaddress
 import re
@@ -36,6 +38,13 @@ API_BASE = f"{BASE_URL}/api"
 
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""
+SMTP_HOST = os.environ.get("SMTP_HOST") or ""
+SMTP_PORT = int(os.environ.get("SMTP_PORT") or "0") or 0
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME") or ""
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") or ""
+EMAIL_FROM = os.environ.get("EMAIL_FROM") or ""
+EMAIL_TO = [addr.strip() for addr in os.environ.get("EMAIL_TO", "").split(",") if addr.strip()]
+EMAIL_SUBJECT_PREFIX = os.environ.get("EMAIL_SUBJECT_PREFIX") or "[Vycebump]"
 CDP_URL = os.environ.get("CDP_URL") or "http://127.0.0.1:9222"
 FORCE_RENEW = os.environ.get("FORCE_RENEW", "").lower() in ("true", "1", "yes")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -160,7 +169,7 @@ def http_request(
 
 
 # ============================================================
-# Telegram 消息推送
+# 消息通知 (Telegram + Email)
 # ============================================================
 def mask_username(username: str) -> str:
     """账号脱敏: dengyie -> de****ie"""
@@ -176,6 +185,70 @@ def mask_username(username: str) -> str:
     return username
 
 
+def build_notification(
+    status_icon: str,
+    status_title: str,
+    account_name: str,
+    details: Optional[Dict] = None,
+    error_msg: str = "",
+) -> Dict[str, str]:
+    """构建通知正文（纯文本 + HTML 双格式），供 Telegram / Email 渠道共用。"""
+    beijing_time = datetime.datetime.now(
+        datetime.timezone(datetime.timedelta(hours=8))
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    masked_acc = mask_username(account_name)
+    escape = lambda value: html.escape(safe_error_text(value, 120), quote=True)
+    fields: List[Tuple[str, str]] = [
+        ("👤 账户", masked_acc),
+    ]
+    if details:
+        if details.get("server_name"):
+            fields.append(("🖥️ 服务器", details["server_name"]))
+        if details.get("plan_id"):
+            fields.append(("📦 规格", f"{details['plan_id']} ({details.get('os', '')})"))
+        if details.get("time_left_str"):
+            fields.append(("⏳ 剩余存活", details["time_left_str"]))
+        if details.get("next_renewal_str"):
+            fields.append(("⏰ 续期时间窗口", details["next_renewal_str"]))
+
+    plain_lines = [
+        "Vyce.cloud 续期通知",
+        "",
+        f"{status_icon} {status_title}",
+    ]
+    html_lines = [
+        "🇪🇺 <b>Vyce.cloud 续期通知</b>",
+        "",
+        f"{escape(status_icon)} <b>{escape(status_title)}</b>",
+    ]
+    for label, value in fields:
+        plain_lines.append(f"{label}: {value}")
+        html_lines.append(f"{escape(label)}: <code>{escape(value)}</code>")
+
+    if error_msg:
+        plain_lines.append(f"⚠️ 详情: {error_msg}")
+        html_lines.append(f"⚠️ 详情: {escape(error_msg)}")
+
+    plain_lines.append(f"⏱️ 报告时间: {beijing_time} (UTC+8)")
+    html_lines.append(f"⏱️ 报告时间: {beijing_time} (UTC+8)")
+
+    return {"plain": "\n".join(plain_lines), "html": "\n".join(html_lines)}
+
+
+def send_notification(
+    status_icon: str,
+    status_title: str,
+    account_name: str,
+    details: Optional[Dict] = None,
+    error_msg: str = "",
+    proxy: Optional[str] = None,
+):
+    """统一通知入口：向所有已配置的渠道 (Telegram / Email) 推送同一消息。"""
+    send_tg_message(status_icon, status_title, account_name, details, error_msg, proxy)
+    send_email_message(status_icon, status_title, account_name, details, error_msg, proxy)
+
+
 def send_tg_message(
     status_icon: str,
     status_title: str,
@@ -188,35 +261,7 @@ def send_tg_message(
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
 
-    beijing_time = datetime.datetime.now(
-        datetime.timezone(datetime.timedelta(hours=8))
-    ).strftime("%Y-%m-%d %H:%M:%S")
-
-    masked_acc = mask_username(account_name)
-    escape = lambda value: html.escape(safe_error_text(value, 120), quote=True)
-    lines = [
-        "🇪🇺 <b>Vyce.cloud 续期通知</b>",
-        "",
-        f"{escape(status_icon)} <b>{escape(status_title)}</b>",
-        f"👤 账户: <code>{escape(masked_acc)}</code>",
-    ]
-
-    if details:
-        if details.get("server_name"):
-            lines.append(f"🖥️ 服务器: <code>{escape(details['server_name'])}</code>")
-        if details.get("plan_id"):
-            lines.append(f"📦 规格: {escape(details['plan_id'])} ({escape(details.get('os', ''))})")
-        if details.get("time_left_str"):
-            lines.append(f"⏳ 剩余存活: <b>{escape(details['time_left_str'])}</b>")
-        if details.get("next_renewal_str"):
-            lines.append(f"⏰ 续期时间窗口: {escape(details['next_renewal_str'])}")
-
-    if error_msg:
-        lines.append(f"⚠️ 详情: {escape(error_msg)}")
-
-    lines.append(f"⏱️ 报告时间: {beijing_time} (UTC+8)")
-
-    text = "\n".join(lines)
+    text = build_notification(status_icon, status_title, account_name, details, error_msg)["html"]
     tg_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = json.dumps({
         "chat_id": TG_CHAT_ID,
@@ -231,6 +276,54 @@ def send_tg_message(
         print("📩 Telegram 通知发送成功！")
     else:
         print(f"⚠️ Telegram 发送失败 ({status}): {safe_error_text(_error_message(res, 'request failed'))}")
+
+
+def send_email_message(
+    status_icon: str,
+    status_title: str,
+    account_name: str,
+    details: Optional[Dict] = None,
+    error_msg: str = "",
+    proxy: Optional[str] = None,
+):
+    """通过 SMTP 发送邮件通知。仅需标准库 smtplib/email，端口 465 走隐式 TLS，其余走 STARTTLS。"""
+    if not (SMTP_HOST and EMAIL_TO):
+        return
+    if SMTP_USERNAME and not SMTP_PASSWORD:
+        print("⚠️ 已配置 SMTP_USERNAME 但缺少 SMTP_PASSWORD，跳过邮件通知。")
+        return
+
+    content = build_notification(status_icon, status_title, account_name, details, error_msg)
+    subject = f"{EMAIL_SUBJECT_PREFIX} {status_icon} {status_title} - {mask_username(account_name)}"
+
+    message = email.message.EmailMessage()
+    message["Subject"] = subject
+    message["From"] = EMAIL_FROM or SMTP_USERNAME
+    message["To"] = ", ".join(EMAIL_TO)
+    message.set_content(content["plain"])
+    message.add_alternative(
+        f"<html><body style='font-family: -apple-system, sans-serif; white-space: pre-wrap;'>"
+        f"{content['html']}</body></html>",
+        subtype="html",
+    )
+
+    try:
+        host = SMTP_HOST
+        port = SMTP_PORT or 587
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=15) as smtp:
+                if SMTP_USERNAME:
+                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+                smtp.send_message(message)
+        else:
+            with smtplib.SMTP(host, port, timeout=15) as smtp:
+                smtp.starttls(context=ssl.create_default_context())
+                if SMTP_USERNAME:
+                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+                smtp.send_message(message)
+        print(f"📩 邮件通知发送成功 -> {', '.join(EMAIL_TO)}")
+    except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
+        print(f"⚠️ 邮件发送失败: {safe_error_text(str(exc), 200)}")
 
 
 # ============================================================
@@ -534,7 +627,7 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
 
     if not user_info:
         print("❌ 账户登录失效或 Cookie 无效，请更新 __Host-vyce_sid Cookie！")
-        send_tg_message(
+        send_notification(
             status_icon="❌",
             status_title="Cookie 失效 / 登录失败",
             account_name=account_label,
@@ -550,7 +643,7 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
     if servers is None:
         error = client.last_error or "无法读取服务器列表"
         print(f"❌ 获取服务器列表失败: {error}")
-        send_tg_message(
+        send_notification(
             status_icon="❌",
             status_title="服务器列表读取失败",
             account_name=real_username,
@@ -646,7 +739,7 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
                     "error": error,
                     "last_check_ts": now_ms,
                 }
-                send_tg_message(
+                send_notification(
                     status_icon="⚠️",
                     status_title="续期成功但状态未验证",
                     account_name=real_username,
@@ -667,7 +760,7 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
                     "error": error,
                     "last_check_ts": now_ms,
                 }
-                send_tg_message(
+                send_notification(
                     status_icon="⚠️",
                     status_title="续期成功但状态未验证",
                     account_name=real_username,
@@ -693,7 +786,7 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
                 "next_renewal_str": ms_to_beijing_str(now_ms + ONE_DAY_MS),
             }
 
-            send_tg_message(
+            send_notification(
                 status_icon="🎉",
                 status_title="Vyce VPS 续期成功",
                 account_name=real_username,
@@ -728,7 +821,7 @@ def process_account(account: Dict, state: Dict, proxy: Optional[str] = None) -> 
                     "error": safe_error_text(msg),
                     "last_check_ts": now_ms,
                 }
-                send_tg_message(
+                send_notification(
                     status_icon="❌",
                     status_title="Vyce VPS 续期失败",
                     account_name=real_username,

@@ -54,7 +54,7 @@ Vyce.cloud 为免费 VPS（如 `Vps-Mini`，1 vCore / 2 GB RAM / 6 GB NVMe / 纯
   - **模式 B · GitHub Actions 云端调度** — 配置 Secret 后每 4 小时自动巡检续期，零成本、零维护。
 - **冷却期智能跳过** — 内置倒计时推算，冷却期内直接跳过续期请求，减少无效调用与被平台频控的风险。
 - **全协议代理支持** — 内置 `proxy_handler.py`，支持 VLESS、VMess、Hysteria2、TUIC、Trojan、AnyTLS、SOCKS5、HTTP(S)，以及双跳链式代理；Actions 中自动拉起 sing-box 并做健康探测。
-- **Telegram 实时推送** — 账号脱敏、服务器状态、剩余存活时间、下次续期窗口与错误告警。
+- **双渠道实时推送** — Telegram 与邮件（SMTP）通知，账号脱敏、服务器状态、剩余存活时间、下次续期窗口与错误告警；两类渠道各自独立配置，配了哪个发哪个，可同时启用。邮件仅用标准库 `smtplib` 实现，保持零依赖。
 - **43 个单元测试** — 覆盖核心算法、状态边界、CDP 与代理安全策略，CI 每次运行前自动执行。
 
 ## 快速开始
@@ -72,6 +72,10 @@ Vyce.cloud 为免费 VPS（如 `Vps-Mini`，1 vCore / 2 GB RAM / 6 GB NVMe / 纯
    | `VYCE_COOKIE` | ✅ | Vyce.cloud 登录 Cookie，格式 `__Host-vyce_sid=xxxx...` |
    | `TG_BOT_TOKEN` | | Telegram Bot Token（[@BotFather](https://t.me/BotFather) 获取） |
    | `TG_CHAT_ID` | | Telegram 接收通知的 Chat ID |
+   | `SMTP_HOST` | | 邮件通知 SMTP 服务器（如 `smtp.qq.com`），与 `EMAIL_TO` 同时配置即启用 |
+   | `SMTP_PORT` | | SMTP 端口，`465` 走隐式 TLS，默认 `587` 走 STARTTLS |
+   | `SMTP_USERNAME` / `SMTP_PASSWORD` | | SMTP 登录账号与授权码（不是邮箱网页密码） |
+   | `EMAIL_TO` | | 收件邮箱，支持逗号分隔多个 |
    | `PROXY_URL` | | 代理节点链接（`vless://`、`hy2://`、`socks5://` 等） |
    | `USERS_JSON` | | 多账号配置，见下方 |
 
@@ -135,12 +139,21 @@ python3 app.py
 | `STATE_FILE` | 状态与冷却倒计时缓存路径 | `./renew_state.json` | `./renew_state.json` |
 | `TG_BOT_TOKEN` | Telegram Bot Token | `123456:ABC-DEF...` | 空 |
 | `TG_CHAT_ID` | Telegram 接收通知 Chat ID | `987654321` | 空 |
+| `SMTP_HOST` | 邮件通知 SMTP 服务器 | `smtp.qq.com` | 空 |
+| `SMTP_PORT` | SMTP 端口：`465` 隐式 TLS，其余走 STARTTLS | `465` / `587` | `587` |
+| `SMTP_USERNAME` | SMTP 登录账号（多为一方邮箱地址） | `notify@mangoqwq.com` | 空 |
+| `SMTP_PASSWORD` | SMTP 授权码（QQ/163 等在邮箱设置里生成，非网页登录密码） | `abcd1234...` | 空 |
+| `EMAIL_FROM` | 发件人地址（默认取 `SMTP_USERNAME`） | `notify@mangoqwq.com` | `SMTP_USERNAME` |
+| `EMAIL_TO` | 收件邮箱，逗号分隔可发多人 | `me@example.com,alt@example.com` | 空 |
+| `EMAIL_SUBJECT_PREFIX` | 邮件主题前缀 | `[Vycebump]` | `[Vycebump]` |
 | `PROXY_SERVER` | HTTP/SOCKS 代理地址（未设置时自动读取 `https_proxy` / `http_proxy`） | `http://127.0.0.1:8080` | 空 |
 | `PROXY_URL` | 全协议节点分享链接（Actions 中拉起 sing-box 并健康探测） | `hy2://pwd@host:port?sni=...` | 空 |
 | `PROXY_CHAIN_URL` | 二级链式代理节点，与 `PROXY_URL` 组成双跳（代码支持，默认工作流未注入，需自行加 env） | `socks5://127.0.0.1:1080` | 空 |
 | `ALLOW_INSECURE_PROXY` | 允许节点携带 `insecure=1`（跳过 TLS 证书校验；默认工作流未注入，需自行加 env） | `1` / `true` | 关闭 |
 
 > 冷却期内的 `429 renewal_cooldown` 属于**预期状态**：脚本记录下次可续期窗口、正常退出（状态码 0），不会告警。
+
+**邮箱通知快速配置（以 QQ 邮箱为例）**：邮箱设置 → 账户 → 开启 SMTP 服务并生成授权码，然后配置 Secrets：`SMTP_HOST=smtp.qq.com`、`SMTP_PORT=465`、`SMTP_USERNAME=你的QQ邮箱`、`SMTP_PASSWORD=授权码`、`EMAIL_TO=接收邮箱`。Gmail（`smtp.gmail.com` + 应用专用密码）、Outlook、企业自建 SMTP 同理，只需换主机与端口。
 
 ## 安全与执行策略
 
@@ -162,6 +175,9 @@ A：会。Vyce 的会话 Cookie 有有效期，失效后续期会返回鉴权错
 
 **Q：Actions 免费额度够用吗？**
 A：公开仓库的 Actions 完全免费；私有仓库每月 2000 分钟额度，本工作流单次运行通常不到 1 分钟、每天 6 次，开销可忽略。
+
+**Q：Telegram 和邮件通知必须二选一吗？**
+A：不用，两个渠道相互独立：只配 TG 就只发 Telegram，只配 SMTP 就只发邮件，都配就同时发。任一渠道发送失败只会打印警告，不会中断续期主流程，也不会影响另一个渠道。
 
 **Q：定时任务突然不跑了？**
 A：三个常见原因：① Fork 后没有在 Actions 页面点击 **Enable workflow**；② GitHub 会在公开仓库**连续 60 天无仓库活动**后自动停用定时工作流，点一下 **Enable workflow** 即可恢复；③ 运行失败时可在该次运行的 Artifacts 中下载 `diagnostic-logs`（内含 `singbox.log`）排查。
