@@ -29,7 +29,7 @@
 
 专为 [Vyce.cloud](https://vyce.cloud/#/servers) 免费 VPS 设计的自动续期与保活工具，架构与理念灵感源自 [dengyie/katabump](https://github.com/dengyie/katabump)。
 
-## 💡 为什么需要自动续期？
+## 为什么需要自动续期？
 
 Vyce.cloud 为免费 VPS（如 `Vps-Mini`，1 vCore / 2 GB RAM / 6 GB NVMe / 纯 IPv6）提供长期免费使用资格，但附带一套保活机制：
 
@@ -42,7 +42,7 @@ Vyce.cloud 为免费 VPS（如 `Vps-Mini`，1 vCore / 2 GB RAM / 6 GB NVMe / 纯
 
 也就是说，**只要错过一次 24h 窗口，机器就进入倒计时**。Vycebump 负责推算冷却倒计时，在窗口打开时自动续期，实现无感保活。
 
-## ✨ 核心特性
+## 核心特性
 
 - **零依赖原生 Python** — 仅用标准库（`urllib`、`ssl`、`json`、`ipaddress`），无需 `pip install` 任何东西，开箱即用。
 - **双模驱动**：
@@ -53,7 +53,7 @@ Vyce.cloud 为免费 VPS（如 `Vps-Mini`，1 vCore / 2 GB RAM / 6 GB NVMe / 纯
 - **Telegram 实时推送** — 账号脱敏、服务器状态、剩余存活时间、下次续期窗口与错误告警。
 - **43 个单元测试** — 覆盖核心算法、状态边界、CDP 与代理安全策略，CI 每次运行前自动执行。
 
-## 🚀 快速开始
+## 快速开始
 
 ### 方式一：GitHub Actions 云端自动调度（推荐）
 
@@ -119,26 +119,26 @@ python3 app.py
 ✅ 任务处理完毕，状态已保存至 renew_state.json。
 ```
 
-## ⚙️ 环境变量
+## 环境变量
 
 | 变量名 | 说明 | 示例 | 默认值 |
 | :--- | :--- | :--- | :--- |
-| `VYCE_COOKIE` | 单账号登录 Cookie | `__Host-vyce_sid=ICYUl...` | 空 |
-| `VYCE_USER` | 单账号显示名（日志脱敏用） | `myname` | `VyceUser` |
-| `USERS_JSON` | 多账号 JSON 数组 | `[{"name":"..","cookie":".."}]` | 空 |
+| `VYCE_COOKIE` | 单账号登录 Cookie，可只填 token（会自动补 `__Host-vyce_sid=` 前缀） | `__Host-vyce_sid=ICYUl...` | 空 |
+| `VYCE_USER` | 单账号显示名（通知与日志脱敏用） | `myname` | `VyceUser` |
+| `USERS_JSON` | 多账号 JSON 数组，元素支持 `name`/`login` 与 `cookie`/`token` | `[{"name":"..","cookie":".."}]` | 空 |
 | `CDP_URL` | 本地 Chrome 调试地址（仅允许回环） | `http://127.0.0.1:9222` | `http://127.0.0.1:9222` |
 | `FORCE_RENEW` | 强制续期，无视冷却保护 | `true` / `false` | `false` |
 | `STATE_FILE` | 状态与冷却倒计时缓存路径 | `./renew_state.json` | `./renew_state.json` |
 | `TG_BOT_TOKEN` | Telegram Bot Token | `123456:ABC-DEF...` | 空 |
 | `TG_CHAT_ID` | Telegram 接收通知 Chat ID | `987654321` | 空 |
-| `PROXY_SERVER` | HTTP/SOCKS 代理地址 | `http://127.0.0.1:8080` | 空 |
-| `PROXY_URL` | 全协议节点分享链接（Actions 拉起 sing-box） | `hy2://pwd@host:port?sni=...` | 空 |
-| `PROXY_CHAIN_URL` | 二级链式代理节点 | `socks5://127.0.0.1:1080` | 空 |
-| `ALLOW_INSECURE_PROXY` | 允许 `insecure=1` 的节点（跳过证书校验） | `1` / `true` | 关闭 |
+| `PROXY_SERVER` | HTTP/SOCKS 代理地址（未设置时自动读取 `https_proxy` / `http_proxy`） | `http://127.0.0.1:8080` | 空 |
+| `PROXY_URL` | 全协议节点分享链接（Actions 中拉起 sing-box 并健康探测） | `hy2://pwd@host:port?sni=...` | 空 |
+| `PROXY_CHAIN_URL` | 二级链式代理节点，与 `PROXY_URL` 组成双跳（本地生成配置时生效） | `socks5://127.0.0.1:1080` | 空 |
+| `ALLOW_INSECURE_PROXY` | 允许节点携带 `insecure=1`（跳过 TLS 证书校验，默认拒绝） | `1` / `true` | 关闭 |
 
 > 冷却期内的 `429 renewal_cooldown` 属于**预期状态**：脚本记录下次可续期窗口、正常退出（状态码 0），不会告警。
 
-## 🛡️ 安全与执行策略
+## 安全与执行策略
 
 1. **零源码硬编码凭据（Fork 友好）** — 任何人 Fork 后无需修改源码，凭据、代理链接与 Telegram 配置全部走 Actions Secrets。项目**不支持也不读取 `login.json` 等明文凭据文件**，从根上避免凭据落盘被误提交。
 2. **HTTP 429 冷却契约** — 存活时间 > 24h 时平台返回 `429 {"error":"renewal_cooldown"}`：
@@ -148,16 +148,19 @@ python3 app.py
 4. **代理 Fail-Closed** — Actions 中配置 `PROXY_URL` 后会拉起 sing-box 并做连通性探测；节点异常则**立即失败退出**，绝不静默降级为直连，避免真实出口 IP 泄露。sing-box 二进制下载带 SHA256 校验。
 5. **状态缓存边界** — `renew_state.json` 仅用于本地减少无意义请求（已加入 `.gitignore`，不会入库）；Actions 每次都是干净环境，以服务端返回的冷却状态为准。
 
-## ❓ 常见问题
+## 常见问题
 
 **Q：会不会被判定为异常流量 / 封号？**
-A：脚本只在官方续期窗口内发起一次标准 REST 请求，冷却期内直接跳过，请求频率远低于人工操作，且不复用浏览器指纹、不模拟点击。
+A：脚本只在冷却结束、进入可续期窗口后调用一次官方续期接口，其余时间仅做少量状态查询，请求频率远低于人工点面板；不注入页面脚本、不模拟点击，Actions 模式下也不依赖浏览器。
 
 **Q：Cookie 会过期吗？**
-A：会。Vyce 的会话 Cookie 有有效期，失效后续期会返回鉴权错误并触发 Telegram 告警，此时重新获取 `__Host-vyce_sid` 更新 Secret 即可。本地 CDP 模式则无需关心，每次运行都会自动抓取最新 Cookie。
+A：会。Vyce 的会话 Cookie 有有效期，失效后续期会返回鉴权错误并触发 Telegram 告警，此时重新获取 `__Host-vyce_sid` 更新 Secret 即可。本地 CDP 模式无需手动维护 Cookie，只要 Chrome 保持登录状态，每次运行都会自动抓取最新会话。
 
 **Q：Actions 免费额度够用吗？**
 A：公开仓库的 Actions 完全免费；私有仓库每月 2000 分钟额度，本工作流单次运行通常不到 1 分钟、每天 6 次，开销可忽略。
+
+**Q：定时任务突然不跑了？**
+A：三个常见原因：① Fork 后没有在 Actions 页面点击 **Enable workflow**；② GitHub 会在公开仓库**连续 60 天无仓库活动**后自动停用定时工作流，点一下 **Enable workflow** 即可恢复；③ 运行失败时可在该次运行的 Artifacts 中下载 `diagnostic-logs`（内含 `singbox.log`）排查。
 
 **Q：支持多账号吗？**
 A：支持，通过 `USERS_JSON` 配置，脚本会逐个账号串行处理并分别推送通知。
@@ -168,7 +171,7 @@ A：关机状态（48h 内未续期）仍可通过续期重置存活时间；**�
 **Q：需要 `pip install` 吗？**
 A：不需要。项目零第三方依赖，仅本地 CDP 模式额外需要系统里有 `node`。
 
-## 🧪 开发与测试
+## 开发与测试
 
 ```bash
 # 运行全部单元测试（43 个，无需额外依赖）
@@ -185,13 +188,13 @@ vycebump/
 └── .github/workflows/  # Actions 定时续期工作流
 ```
 
-## 🌟 致谢
+## 致谢
 
 [![LINUX DO](https://img.shields.io/badge/Community-LINUX%20DO-2563eb.svg?logo=linux&logoColor=white)](https://linux.do/)
 
 > 🐧 **本项目致谢 [LINUX DO](https://linux.do/) 社区。** 从架构选型、保活思路到代理与排障经验，都受益于社区佬友们的无私分享与深入讨论。致敬开源精神与纯粹的技术探索！
 
-## 📄 许可证
+## 许可证
 
 本项目依据 [MIT License](LICENSE) 开源，仅供个人自动化管理与技术交流学习使用。
 
